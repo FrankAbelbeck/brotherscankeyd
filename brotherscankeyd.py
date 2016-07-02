@@ -259,9 +259,11 @@ Raises:
 				)
 			)
 		)
-		if errIndication or errStatus:
-			print(errIndex,errStatus.prettyPrint(),errIndex,varBinds)
-			raise OSError
+		if errIndication:
+			print(errIndication)
+		else:
+			if errStatus:
+				print("{} at {}".format(errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
 	
 	
 	def main(self):
@@ -274,6 +276,10 @@ Raises:
 		
 		# prepare asynchronous I/O using epoll
 		self._epoll = select.epoll()
+		
+		# prepare process and sequence management
+		self._processes = dict()
+		self._seqnum = list()
 		
 		# register all timers
 		for fd in self._timers.keys():
@@ -331,7 +337,9 @@ Raises:
 			for fd,fdevent in fdevents:
 				
 				if fd == fd_server:
+					#
 					# server socket became readable: new input
+					#
 					data,address = self._socket_server.recvfrom(self._buffersize)
 					datastr = data.decode()
 					print("incoming UDP packet:",data,address)
@@ -339,43 +347,51 @@ Raises:
 						datadict = dict([i.split("=",1) for i in datastr[datastr.index("TYPE=BR;"):].split(";") if "=" in i])
 					except ValueError:
 						# index() failed --> no TYPE=BR field --> invalid packet
-						datadict = dict()
-					# sanity check: appnum corresponds to function? correct hostname:port?
-					# at least my scanner sends two identical packets
-					# -> identify check: SEQ, scanner port sending the packet
-					#
-					# TODO: expanded sanity check with SEQ number checking
-					#       call script in the background, manage PIDs (prevent blocking by script, prevent multiple scans)
-					#
-					hostname,port = datadict["HOST"].rsplit(":",1)
-					if datadict["BUTTON"] == "SCAN" and datadict["APPNUM"] == self.genAppNum(datadict["FUNC"]) and \
+						break
+					# sanity check:
+					#  - scan button?
+					#  - appnum corresponds to function?
+					#  - correct hostname:port?
+					#  - sequence number not yet seen?
+					# (at least my scanner sends two identical packets)
+					try:
+						hostname,port = datadict["HOST"].rsplit(":",1)
+						port = int(port)
+						user = datadict["USER"].strip('"')
+						function = datadict["FUNC"]
+						button = datadict["BUTTON"]
+						appnum = datadict["APPNUM"]
+						seq = dadadict["SEQ"]
+					except (ValueError,KeyError):
+						# erroneous message/invalid port: ignore
+						break
+					
+					if button == "SCAN" and appnum == self.genAppNum(function) and \
 						hostname == self._hostname and port == self._port and \
-						"USER" in datadict and "FUNC" in datadict:
-						#
-						# call a script associated with given function/user name
-						#
-						print('scan button event "{0}/{1}" received from {2}'.format(
-							datadict["FUNC"],
-							datadict["USER"],
-							address[0]
-						))
+						seq not in self._seqnum:
+						# scan button message; appnum equivalent to function name
+						# correct hostname/port and sequence number not seen yet
+						# -> call a script associated with given function/user name
+						print('scan button event "{0}/{1}" received from {2}'.format(function,user,address[0]))
 						try:
 							device = self._devices[address[0]]
 						except KeyError:
 							break # a deviced called in that is not registered? nevermind
 						try:
 							# call script in background, memorise PID?
-							subprocess.call([
-								self._config[datadict["FUNC"]][datadict["USER"].strip('"')],
-								device
-							])
+							process = subprocess.Popen([self._config[function][user],device],stdout=subprocess.PIPE)
+							self._processes[process.stdout.fileno()] = process
+							self._seqnum[process.stdout.fileno()] = seq
+							self._epoll.register(process.stdout.fileno(),select.EPOLLHUP)
 						except:
 							# either call() failed or no script is connected to said device/function/user:
-							# call scanimage with --dont-scan as fallback
-							subprocess.call(["/usr/bin/scanimage","--device-name",device,"--dont-scan"])
+							# need to think of a way to send an error message to the scanner?
+							pass
 				
 				elif fd in self._scanners:
+					#
 					# a timer expired: repeat SNMP SET requests
+					#
 					self._timers[fd].read() # read timer to disarm epoll on this fd
 					print("sending SNMP SET request to {0}:{1}...".format(*self._scanners[fd].getTransportInfo()[1]))
 					for function in self._config.keys():
@@ -384,9 +400,21 @@ Raises:
 								self.snmpSetRequest(self._scanners[fd],user,function)
 							except OSError:
 								pass
-					
+				
+				elif fd in self._processes:
+					#
+					# process management: stdout of a process hung up
+					#
+					if self._processes[fd].returncode() != None:
+						# process has terminated, remove from list, unregister
+						self._epoll.unregister(fd)
+						del self._processes[fd]
+						del self._seqnum[fd]
+				
 				elif fd == self._signalfile.fileno():
+					#
 					# pending signal
+					#
 					try:
 						siginfo = self._signalfile.read()
 						if siginfo["signo"] == signal.SIGTERM:
@@ -450,7 +478,7 @@ if __name__ == '__main__':
 	if args.command == "start":
 		daemon.start(args.config,args.port)
 	elif args.command == "daemon":
-		daemon.start(True)
+		daemon.start(args.config,args.port,daemonise=True)
 	elif args.command == "stop":
 		daemon.stop()
 
