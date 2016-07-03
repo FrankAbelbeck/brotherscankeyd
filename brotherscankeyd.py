@@ -17,13 +17,15 @@ import socket
 import linuxfd
 import select
 import signal
+import syslog
+
 from pysnmp.entity.rfc3413.oneliner import cmdgen # one-liner SNMP commands
 from pysnmp.proto.rfc1902 import OctetString # create SNMP variable value strings
 
 
 EPOLLRDHUP = 0x2000 # see /usr/include/sys/epoll.h, defined since kernel 2.6.17
 PIDFILE    = "/tmp/brotherscankeyd.pid"
-CONFIGFILE = "/etc/brotherscankeyd.ini"
+CONFIGFILE = "/usr/local/etc/brotherscankeyd.ini"
 
 class Daemon:
 	
@@ -42,11 +44,18 @@ class Daemon:
 		except FileNotFoundError:
 			# no PID file: reset _pid
 			self._pid = None
+		self._doLog = False
+		syslog.openlog("brotherscankeyd.py",syslog.LOG_PID,syslog.LOG_DAEMON)
 	
 	
-	def start(self,configfile,port,daemonise=False):
+	def print(self,priority=syslog.LOG_INFO,*args):
+		if self._doLog:	syslog.syslog(priority," ".join(*args))
+		print(*args)
+	
+	
+	def start(self,configfile,port,doLog,daemonise=False):
 		if self._pid:
-			print("There can be only one brotherscankeyd process.")
+			print("Won't start because there can be only one brotherscankeyd process.")
 			sys.exit(1)
 		
 		# process program configuration
@@ -70,7 +79,7 @@ class Daemon:
 					for entry,path in cfg[menutype].items():
 						if os.path.isfile(path) and os.path.isabs(path):
 							self._config[menutype][entry] = path
-							print("   Adding entry '{entry}' to scan-to-{type} menu...".format(entry=entry,type=menutype))
+							print(" * Adding entry '{entry}' to scan-to-{type} menu...".format(entry=entry,type=menutype))
 		except (ValueError,TypeError,KeyError,configparser.Error):
 			# invalid config: since there are no scan targets further program execution is futile
 			print("Error reading the configuration file. Terminating.")
@@ -116,7 +125,7 @@ class Daemon:
 				timer.settime(self._firstcycle,self._cycle)
 				# map scanner's IP address to a device name (used when processing notifications)
 				self._devices[ipAddress] = devnames[name]
-				print("   Adding device {devname} (IP {ip}, address {address}...".format(devname=name,ip=ipAddress,address=devnames[name]))
+				print(" * Adding device {devname} (IP {ip}, address {address}...".format(devname=name,ip=ipAddress,address=devnames[name]))
 		
 		# create non-blocking server socket
 		
@@ -153,7 +162,6 @@ class Daemon:
 		# send stop message via SIGTERM signal
 		if self._pid:
 			os.kill(self._pid,signal.SIGTERM)
-			os.remove(PIDFILE)
 			print("Sent SIGTERM to {0}".format(self._pid))
 		else:
 			print("There is no process to terminate.")
@@ -260,10 +268,10 @@ Raises:
 			)
 		)
 		if errIndication:
-			print(errIndication)
+			self.print(syslog.LOG_ERR,errIndication)
 		else:
 			if errStatus:
-				print("{} at {}".format(errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
+				self.print(syslog.LOG_ERR,"{} at {}".format(errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
 	
 	
 	def main(self):
@@ -278,8 +286,8 @@ Raises:
 		self._epoll = select.epoll()
 		
 		# prepare process and sequence management
-		self._processes = dict()
-		self._seqnum = list()
+		processes = dict()
+		seqnum = dict()
 		
 		# register all timers
 		for fd in self._timers.keys():
@@ -342,7 +350,7 @@ Raises:
 					#
 					data,address = self._socket_server.recvfrom(self._buffersize)
 					datastr = data.decode()
-					print("incoming UDP packet:",data,address)
+					self.print(syslog.LOG_INFO,"incoming UDP packet:",data,address)
 					try:
 						datadict = dict([i.split("=",1) for i in datastr[datastr.index("TYPE=BR;"):].split(";") if "=" in i])
 					except ValueError:
@@ -360,32 +368,38 @@ Raises:
 						user = datadict["USER"].strip('"')
 						function = datadict["FUNC"]
 						button = datadict["BUTTON"]
-						appnum = datadict["APPNUM"]
-						seq = dadadict["SEQ"]
+						appnum = int(datadict["APPNUM"])
+						seq = datadict["SEQ"]
 					except (ValueError,KeyError):
 						# erroneous message/invalid port: ignore
 						break
 					
 					if button == "SCAN" and appnum == self.genAppNum(function) and \
 						hostname == self._hostname and port == self._port and \
-						seq not in self._seqnum:
+						seq not in seqnum.values():
 						# scan button message; appnum equivalent to function name
 						# correct hostname/port and sequence number not seen yet
 						# -> call a script associated with given function/user name
-						print('scan button event "{0}/{1}" received from {2}'.format(function,user,address[0]))
+						self.print(syslog.LOG_INFO,'scan button event "{0}/{1}" received from {2}'.format(function,user,address[0]))
 						try:
 							device = self._devices[address[0]]
 						except KeyError:
 							break # a deviced called in that is not registered? nevermind
 						try:
 							# call script in background, memorise PID?
-							process = subprocess.Popen([self._config[function][user],device],stdout=subprocess.PIPE)
-							self._processes[process.stdout.fileno()] = process
-							self._seqnum[process.stdout.fileno()] = seq
+							process = subprocess.Popen(
+								[self._config[function][user],device],
+								stdout=subprocess.PIPE,
+								stderr=subprocess.PIPE,
+								universal_newlines=True
+							)
+							processes[process.stdout.fileno()] = process
+							seqnum[process.stdout.fileno()] = seq
 							self._epoll.register(process.stdout.fileno(),select.EPOLLHUP)
 						except:
 							# either call() failed or no script is connected to said device/function/user:
 							# need to think of a way to send an error message to the scanner?
+							print(sys.exc_info())
 							pass
 				
 				elif fd in self._scanners:
@@ -393,7 +407,7 @@ Raises:
 					# a timer expired: repeat SNMP SET requests
 					#
 					self._timers[fd].read() # read timer to disarm epoll on this fd
-					print("sending SNMP SET request to {0}:{1}...".format(*self._scanners[fd].getTransportInfo()[1]))
+					self.print(syslog.LOG_INFO,"sending SNMP SET request to {0}:{1}...".format(*self._scanners[fd].getTransportInfo()[1]))
 					for function in self._config.keys():
 						for user in self._config[function].keys():
 							try:
@@ -401,15 +415,22 @@ Raises:
 							except OSError:
 								pass
 				
-				elif fd in self._processes:
+				elif fd in processes:
 					#
 					# process management: stdout of a process hung up
 					#
-					if self._processes[fd].returncode() != None:
-						# process has terminated, remove from list, unregister
-						self._epoll.unregister(fd)
-						del self._processes[fd]
-						del self._seqnum[fd]
+					if processes[fd].poll() != None:
+						# process has not yet terminated, but stdout hung up: zombie? kill it
+						processes[fd].kill()
+					# print stdout and sterr, reps.
+					self.print(syslog.LOG_INFO,processes[fd].stdout.read())
+					if processes[fd].returncode != 0:
+						self.print(syslog.LOG_ERR,processes[fd].stderr.read())
+					# unregister stdout fileno
+					self._epoll.unregister(fd)
+					# remove from list
+					del processes[fd]
+					del seqnum[fd]
 				
 				elif fd == self._signalfile.fileno():
 					#
@@ -419,11 +440,15 @@ Raises:
 						siginfo = self._signalfile.read()
 						if siginfo["signo"] == signal.SIGTERM:
 							# should terminate: end loop
-							print("received SIGTERM: terminating...")
+							self.print(syslog.LOG_INFO,"received SIGTERM: terminating...")
 							self.isrunning = False
 						# SIGINT is silently ignored
 					except:
 						pass
+		
+		# daemon is terminating...
+		os.remove(PIDFILE)
+		syslog.closelog()
 
 
 if __name__ == '__main__':
@@ -443,7 +468,9 @@ if __name__ == '__main__':
    
    ; what follows are optional entries for the scanner's various scan-to menus
    ; definitions here will create an entry of given name below the given menu
-   ; if called a single parameter with the device name is passed to scanscript 
+   ;
+   ; if called, a single parameter with the device name is passed to scanscript
+   ; any output of the script is written to stdout and/or syslog
    
    ; menu: scan to file
    [FILE]
@@ -468,6 +495,7 @@ if __name__ == '__main__':
 	parser.add_argument("command",choices=("start","daemon","stop"),help="start, start daemonised or stop this daemon")
 	parser.add_argument("-c","--config",metavar="CFG",type=argparse.FileType("r"),help="load configuration file CFG")
 	parser.add_argument("-p","--port",metavar="PORT",type=int,default=54925,help="use UDP port PORT (default 54925)")
+	parser.add_argument("-s","--syslog",action='store_true',help="write information to syslog")
 	# default port 54925: it seems Brother scanners address their notifications to this UDP port,
 	# ignoring the port value passed via SNMP request?
 	# cf. Brother website: 54925 = scanning, 54926 = PC fax receiving
@@ -476,9 +504,9 @@ if __name__ == '__main__':
 	# create daemon and execute given command
 	daemon = Daemon()
 	if args.command == "start":
-		daemon.start(args.config,args.port)
+		daemon.start(args.config,args.port,args.syslog)
 	elif args.command == "daemon":
-		daemon.start(args.config,args.port,daemonise=True)
+		daemon.start(args.config,args.port,args.syslog,daemonise=True)
 	elif args.command == "stop":
 		daemon.stop()
 
