@@ -8,17 +8,18 @@ Frank Abelbeck (c) 2016
 - Daemon calls scripts according to its rules given in the configuation file
 """
 
-import sys,os.path,subprocess,argparse,configparser
+import sys,os,os.path,subprocess,argparse,configparser
 import socket
 import linuxfd
 import select
 import signal
 import syslog
 import shlex
+import errno
 
 from pysnmp.entity.rfc3413.oneliner import cmdgen # one-liner SNMP commands
 from pysnmp.proto.rfc1902 import OctetString # create SNMP variable value strings
-
+import pysnmp.error
 
 EPOLLRDHUP = 0x2000 # see /usr/include/sys/epoll.h, defined since kernel 2.6.17
 PIDFILE    = "/tmp/brotherscankeyd.pid"
@@ -80,20 +81,104 @@ Args:
 			cfg = configparser.RawConfigParser()
 			cfg.optionxform = lambda option: option # don't convert to lowercase
 			cfg.read_file(configfile)
+			#
+			# accepted ini structure:
+			#  - section General
+			#  - one or more Device sections not named "General" and not ending in :IMAGE, :FILE, :OCR or :EMAIL
+			#  - zero or more sections ending with :IMAGE
+			#  - zero or more sections ending with :FILE
+			#  - zero or more sections ending with :OCR
+			#  - zero or more sections ending with :EMAIL
+			#
+			# check section "General"
 			self._firstcycle = cfg.getint("General","first cycle",fallback=3)
 			self._cycle      = cfg.getint("General","cycle",fallback=300)
 			self._buffersize = cfg.getint("General","buffer size",fallback=4096)
-			# obtain menu entries
+			
+			# collect all device sections
+			self._scanners = dict()
+			self._devices  = dict()
+			self._timers = dict()
+			
+			secDevs  = list()
+			secRules = list()
+			for section in cfg.sections():
+				if section == "General":
+					# ignore general parameters, already processed
+					continue
+				elif section in ("IMAGE","FILE","OCR","EMAIL") or section.endswith(":IMAGE") or section.endswith(":FILE") or section.endswith(":OCR") or section.endswith(":EMAIL"):
+					# section named IMAGE|FILE|OCR|EMAIL or ending in these strings: a menu definition, add to rules
+					secRules.append(section)
+				elif "ip" in cfg[section].keys() and "dev" in cfg[section].keys():
+					# any remaining section containing fields "ip" and "dev" is a device definition
+					secDevs.append(section)
+			
+			# iterate over all device definitions
+			devips = dict()
+			devnames = dict()
+			for device in secDevs:
+					try:
+						# create UDP transport; fails if ip is invalid
+						transport = cmdgen.UdpTransportTarget((cfg[device]["ip"],161))
+						timer = linuxfd.timerfd(rtc=True,nonBlocking=True)
+						# map timer fileno to UDP transport: timer expires --> send new request to scanner IP
+						self._timers[timer.fileno()] = timer
+						self._scanners[timer.fileno()] = transport
+						# activate timer, so that after self._firstcycle seconds the first request is sent
+						# and then every self._cycle seconds this request is renewed
+						timer.settime(self._firstcycle,self._cycle)
+						# map scanner's IP address to a device name (used when processing notifications)
+						if cfg[device]["ip"] in self._devices or cfg[device]["dev"] in self._devices.values():
+							print(" * Not adding device {devname} because its parameters were already used")
+						else:
+							self._devices[cfg[device]["ip"]] = cfg[device]["dev"]
+							devips[device] = cfg[device]["ip"]
+							devnames[cfg[device]["ip"]] = device
+							print(" * Adding device {devname} (IP={ip},dev={address})...".format(devname=device,ip=cfg[device]["ip"],address=cfg[device]["dev"]))
+					except (pysnmp.error.PySnmpError,OSError):
+						# pysnmp: transport target could not be set up
+						# OSError: timer creation failed
+						# in any case: don't add device
+						pass
+			
+			# iterate over all rule definitions
 			self._config = dict()
-			for menutype in ("IMAGE","FILE","OCR","EMAIL"):
-				if menutype in cfg:
-					self._config[menutype] = dict()
+			for menutype in secRules:
+				try:
+					devname,menu = menutype.rsplit(":",1)
+					devs = [devips[devname]]
+				except ValueError:
+					# tuple unpacking failed: must be a global IMAGE|FILE|OCR|EMAIL
+					menu = menutype
+					devs = self._devices.keys()
+				# iterate over all found devices
+				for dev in devs:
+					# iterate over all entries beneath the menu type
 					for entry,path in cfg[menutype].items():
-						pathargs = shlex.split(path)
-						script = pathargs[0]
+						pathargs = shlex.split(path) # split path according to BASh syntax
+						script = pathargs[0] # isolate script name
 						if os.path.isfile(script) and os.path.isabs(script):
-							self._config[menutype][entry] = pathargs
-							print(" * Adding entry '{entry}' to scan-to-{type} menu...".format(entry=entry,type=menutype))
+							# script file exists: create entry
+							try:
+								# add path to script for this device's menu entry
+								self._config[dev][menu][entry] = pathargs
+							except KeyError:
+								try:
+									# one of the dictionarys uninitialised:
+									# step one level up, create dict
+									self._config[dev][menu] = dict()
+									self._config[dev][menu][entry] = pathargs
+								except KeyError:
+									# still one of the dictionarys uninitialised:
+									# step one level up, create dict
+									self._config[dev] = dict()
+									self._config[dev][menu] = dict()
+									self._config[dev][menu][entry] = pathargs
+							print(" * Adding entry {device} / {menu} / {entry}...".format(entry=entry,menu=menu,device=devnames[dev]))
+		except configparser.DuplicateSectionError:
+			# one duplicate section found: invalid config, exit with error
+			print("Duplicate Section found in configuration file. Terminating.")
+			sys.exit(1)
 		except (ValueError,TypeError,KeyError,configparser.Error):
 			# invalid config: since there are no scan targets further program execution is futile
 			print("Error reading the configuration file. Terminating.")
@@ -103,47 +188,7 @@ Args:
 		self._generator = cmdgen.CommandGenerator()
 		self._community = cmdgen.CommunityData("internal", mpModel=0) # mpModel == 0 --> SNMP version 1 
 		
-		# obtain a list of known scanner IP addresses and map it to timers/device names
-		devicequery = [ i.split("#")[1:] for i in subprocess.check_output(["/usr/bin/scanimage","-f",'%v # %m # %d%n']).decode().splitlines() if i.startswith("Brother") ]
-		devnames    = { k.strip():v.strip() for k,v in devicequery }
-		sanequery    = subprocess.check_output(["/usr/bin/brsaneconfig4","-q"]).decode().splitlines()
-		
-		self._scanners = dict()
-		self._devices  = dict()
-		self._timers = dict()
-		print("Collecting list of active scanners on the net")
-		while len(sanequery) > 0:
-			# output of brsaneconfig4:
-			#    <list of supported devices>
-			# 
-			#    Devices on network
-			#    <list of registered devices>
-			#
-			# pop(): remove last item --> process query string lines from back to front
-			line = sanequery.pop()
-			if line.startswith("Devices on network"):
-				# found delimiting string: exit iteration
-				break
-			else:
-				# output of brsaneconfig4:
-				#  0 MFC-L2720DW         "MFC-L2720DW"       I:192.168.1.3
-				# we need the part after "I:" and the first word after the inital index number
-				ipAddress = line.partition("I:")[2]
-				name      = line.split()[1]
-				# map timer fileno to UDP transport: timer expires --> send new request to scanner IP
-				timer = linuxfd.timerfd(rtc=True,nonBlocking=True)
-				self._timers[timer.fileno()] = timer
-				self._scanners[timer.fileno()] = cmdgen.UdpTransportTarget((ipAddress,161))
-				# activate timer, so that after self._firstcycle seconds the first request is sent
-				# and then every self._cycle seconds this request is renewed
-				timer.settime(self._firstcycle,self._cycle)
-				# map scanner's IP address to a device name (used when processing notifications)
-				self._devices[ipAddress] = devnames[name]
-				print(" * Adding device {devname} (IP {ip}, address {address}...".format(devname=name,ip=ipAddress,address=devnames[name]))
-		
 		# create non-blocking server socket
-		
-		# prepare hostname and port this client will use
 		try:
 			print("Opening UDP socket...",end="")
 			self._socket_server = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
@@ -160,9 +205,9 @@ Args:
 				# most probably a port <1024 should be bound by a non-root process
 				print("Permission denied!")
 				sys.exit(1)
-			else:
+			elif isinstance(e,socket.gaierror):
 				# unexpected error...
-				print("Unknown error!")
+				print("Socket error:",e)
 				sys.exit(1)
 		
 		if daemonise:
@@ -378,7 +423,7 @@ Raises:
 							break # a deviced called in that is not registered? nevermind
 						try:
 							# call script as background process
-							command = list(self._config[function][user]) # copy script command
+							command = list(self._config[address[0]][function][user]) # copy script command
 							command.insert(1,device) # insert device name into script command
 							process = subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,universal_newlines=True)
 							processes[process.stdout.fileno()] = process
@@ -455,11 +500,20 @@ if __name__ == '__main__':
    ; If one or all of these parameters are not defined, the program will fall
    ; back to the default values.
    
-   ; What follows are optional entries for the scanner's various scan-to menus;
-   ; definitions here will create an entry of given name below the given menu.
+   [Device Name]
+   ; definition of device "Device Name"
+   ip = hostname.or.ip.address
+   dev = sane device address
+   
+   ; What follows are optional entries for the scanners' various scan-to menus;
+   ; definitions here will create an entry of given name below the given menu
+   ; of each device defined above.
    ; When activated, the given _absolute_ script path is called and the device
    ; address is passed as first argument; if any arguments are specified
    ; (cf. FILE/"Another entry"), these will be passed as 2nd arg and following.
+   ;
+   ; To define a device-specific menu entry, prepend a colon : and the device
+   ; name (see above) to FILE|IMAGE|OCR|EMAIL (cf. entry OCR)
    
    ; menu: scan to file
    [FILE]
@@ -470,8 +524,8 @@ if __name__ == '__main__':
    [IMAGE]
    Entry name = /absolute/path/to/scanscript
 
-   ; menu: scan to OCR/text file
-   [OCR]
+   ; menu: scan to OCR/text file; here only specific to device "Device Name"
+   [Device Name:OCR]
    Entry name = /absolute/path/to/scanscript
 
    ; menu: scan to e-mail
