@@ -1,12 +1,20 @@
-#!/usr/bin/env python
-"""
-Brother Scan Key Daemon - brotherscankeyd
-Frank Abelbeck (c) 2016
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+LICENSE="""brotherscankeyd: Scan Key Daemon for Brother Inc. Network Scanners
+Copyright (C) 2016 Frank Abelbeck <frank.abelbeck@googlemail.com>
 
-- Daemon registers itself with known Brother scanners via SNMP
-- Daemon listens for certain UDP packets (scan button notifications)
-- Daemon calls scripts according to its rules given in the configuation file
-"""
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>."""
 
 import sys,os,os.path,subprocess,argparse,configparser
 import socket
@@ -20,10 +28,57 @@ import errno
 from pysnmp.entity.rfc3413.oneliner import cmdgen # one-liner SNMP commands
 from pysnmp.proto.rfc1902 import OctetString # create SNMP variable value strings
 import pysnmp.error
+import pysnmp.carrier.error
 
 EPOLLRDHUP = 0x2000 # see /usr/include/sys/epoll.h, defined since kernel 2.6.17
 PIDFILE    = "/tmp/brotherscankeyd.pid"
 CONFIGFILE = "/usr/local/etc/brotherscankeyd.ini"
+
+CONFIGHELP = """Configuration file layout (ini file style):
+
+   [General]
+   ; General parameters; this example shows the default values;
+   ;   first cycle: delay in seconds until first SNMP request is sent;
+   ;   cycle: delay in seconds between consecutive SNMP requests;
+   ;   buffer size: number of bytes to read when new UDP packets arrive.
+   first cycle = 3
+   cycle = 300
+   buffer size = 4096
+   ; If one or all of these parameters are not defined, the program will fall
+   ; back to the default values.
+   
+   [Device Name]
+   ; definition of device "Device Name"
+   ip = hostname.or.ip.address
+   dev = sane device address
+   
+   ; What follows are optional entries for the scanners' various scan-to menus;
+   ; definitions here will create an entry of given name below the given menu
+   ; of each device defined above.
+   ; When activated, the given _absolute_ script path is called and the device
+   ; address is passed as first argument; if any arguments are specified
+   ; (cf. FILE/"Another entry"), these will be passed as 2nd arg and following.
+   ;
+   ; To define a device-specific menu entry, prepend a colon : and the device
+   ; name (see above) to FILE|IMAGE|OCR|EMAIL (cf. entry OCR)
+   
+   ; menu: scan to file
+   [FILE]
+   Entry name = /absolute/path/to/scanscript
+   Another entry = /absolute/path/to/scanscript arg1 arg2
+
+   ; menu: scan to image
+   [IMAGE]
+   Entry name = /absolute/path/to/scanscript
+
+   ; menu: scan to OCR/text file; here only specific to device "Device Name"
+   [Device Name:OCR]
+   Entry name = /absolute/path/to/scanscript
+
+   ; menu: scan to e-mail
+   [EMAIL]
+   Entry name = /absolute/path/to/scanscript
+"""
 
 
 class Daemon:
@@ -58,7 +113,7 @@ Args:
 		print(*args)
 	
 	
-	def start(self,configfile,port,doLog,daemonise=False):
+	def start(self,configfile,hostname,port,doLog,daemonise=False):
 		"""Start the daemon.
 
 Args:
@@ -181,7 +236,10 @@ Args:
 			sys.exit(1)
 		except (ValueError,TypeError,KeyError,configparser.Error):
 			# invalid config: since there are no scan targets further program execution is futile
-			print("Error reading the configuration file. Terminating.")
+			if os.path.isfile(configfile):
+				print("Error reading the configuration file. Terminating.")
+			else:
+				print("Default configuration file {} missing. Terminating.".format(CONFIGFILE))
 			sys.exit(1)
 		
 		# prepare SNMP generator
@@ -190,10 +248,15 @@ Args:
 		
 		# create non-blocking server socket
 		try:
+			if not hostname:
+				# no hostname argument given: try to obtain it automatically
+				hostname = socket.gethostbyname(socket.gethostname())
+			
 			print("Opening UDP socket...",end="")
 			self._socket_server = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-			self._socket_server.bind(( socket.gethostbyname(socket.gethostname()), port ))
+			self._socket_server.bind(( hostname,port ))
 			self._socket_server.setblocking(False)
+			# read back actual hostname/port information
 			self._hostname,self._port = self._socket_server.getsockname()
 			print(" done ({0}:{1})".format(self._hostname,self._port))
 		except OSError as e:
@@ -439,12 +502,13 @@ Raises:
 					# a timer expired: repeat SNMP SET requests
 					#
 					self._timers[fd].read() # read timer to disarm epoll on this fd
-					self.print(syslog.LOG_INFO,"sending SNMP SET request to {0}:{1}...".format(*self._scanners[fd].getTransportInfo()[1]))
-					for function in self._config.keys():
-						for user in self._config[function].keys():
+					hostname,port = self._scanners[fd].getTransportInfo()[1]
+					self.print(syslog.LOG_INFO,"sending SNMP SET request to {0}:{1}...".format(hostname,port))
+					for function in self._config[hostname].keys():
+						for user in self._config[hostname][function].keys():
 							try:
 								self.snmpSetRequest(self._scanners[fd],function,user)
-							except OSError:
+							except:
 								pass
 				
 				elif fd in processes:
@@ -488,65 +552,37 @@ if __name__ == '__main__':
 	parser = argparse.ArgumentParser(
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 		description="Start or manage a Brother Scan Key Daemon.",
-		epilog="""Configuration file layout (ini file style):
-   [General]
-   ; General parameters; this example shows the default values;
-   ;   first cycle: delay in seconds until first SNMP request is sent;
-   ;   cycle: delay in seconds between consecutive SNMP requests;
-   ;   buffer size: number of bytes to read when new UDP packets arrive.
-   first cycle = 3
-   cycle = 300
-   buffer size = 4096
-   ; If one or all of these parameters are not defined, the program will fall
-   ; back to the default values.
-   
-   [Device Name]
-   ; definition of device "Device Name"
-   ip = hostname.or.ip.address
-   dev = sane device address
-   
-   ; What follows are optional entries for the scanners' various scan-to menus;
-   ; definitions here will create an entry of given name below the given menu
-   ; of each device defined above.
-   ; When activated, the given _absolute_ script path is called and the device
-   ; address is passed as first argument; if any arguments are specified
-   ; (cf. FILE/"Another entry"), these will be passed as 2nd arg and following.
-   ;
-   ; To define a device-specific menu entry, prepend a colon : and the device
-   ; name (see above) to FILE|IMAGE|OCR|EMAIL (cf. entry OCR)
-   
-   ; menu: scan to file
-   [FILE]
-   Entry name = /absolute/path/to/scanscript
-   Another entry = /absolute/path/to/scanscript arg1 arg2
+		epilog="""Copyright (C) 2016 Frank Abelbeck <frank.abelbeck@googlemail.com>
 
-   ; menu: scan to image
-   [IMAGE]
-   Entry name = /absolute/path/to/scanscript
-
-   ; menu: scan to OCR/text file; here only specific to device "Device Name"
-   [Device Name:OCR]
-   Entry name = /absolute/path/to/scanscript
-
-   ; menu: scan to e-mail
-   [EMAIL]
-   Entry name = /absolute/path/to/scanscript
-""")
-	parser.add_argument("command",choices=("start","daemon","stop"),help="start, start daemonised or stop this daemon")
+This program comes with ABSOLUTELY NO WARRANTY. It is free software,
+and you are welcome to redistribute it under certain conditions
+(see command "license" for details)."""
+	)
+	parser.add_argument("command",choices=("start","daemon","stop","license","config"),help="start, start daemonised or stop this daemon, show more license information or print help on the configuration file format")
 	parser.add_argument("-c","--config",metavar="CFG",type=argparse.FileType("r"),help="load configuration file CFG")
-	parser.add_argument("-p","--port",metavar="PORT",type=int,default=54925,help="use UDP port PORT (default 54925)")
-	parser.add_argument("-s","--syslog",action='store_true',help="write information to syslog")
 	# default port 54925: it seems Brother scanners address their notifications to this UDP port,
 	# ignoring the port value passed via SNMP request?
 	# cf. Brother website: 54925 = scanning, 54926 = PC fax receiving
+	parser.add_argument("-a","--address",metavar="ADDRESS",help="use hostname ADDRESS (default: try to determine the hostname/IPv4 automatically)")
+	parser.add_argument("-p","--port",metavar="PORT",type=int,default=54925,help="use UDP port PORT (default: %(default)s)")
+	parser.add_argument("-s","--syslog",action='store_true',help="write information to syslog")
 	args = parser.parse_args()
+	
+	if args.command == "license":
+		# print license information and exit successfully
+		print(LICENSE)
+		sys.exit(0)
+	elif args.command == "config":
+		# print help on the configuration file format and exit successfully
+		print(CONFIGHELP)
+		sys.exit(0)
 	
 	# create daemon and execute given command
 	daemon = Daemon()
 	if args.command == "start":
-		daemon.start(args.config,args.port,args.syslog)
+		daemon.start(args.config,args.address,args.port,args.syslog)
 	elif args.command == "daemon":
-		daemon.start(args.config,args.port,args.syslog,daemonise=True)
+		daemon.start(args.config,args.address,args.port,args.syslog,daemonise=True)
 	elif args.command == "stop":
 		daemon.stop()
 

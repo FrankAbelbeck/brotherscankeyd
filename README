@@ -1,0 +1,110 @@
+--------------------------------------------------------------------------------
+brotherscankeyd: Scan Key Daemon for Brother Inc. Network Scanners
+--------------------------------------------------------------------------------
+
+Copyright (C) 2016 Frank Abelbeck <frank.abelbeck@googlemail.com>
+
+This file is part of the brotherscankeyd program "brotherscankeyd.py".
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+--------------------------------------------------------------------------------
+General information
+--------------------------------------------------------------------------------
+
+Author:  Frank Abelbeck
+Version: 2016-07-04
+Licence: GNU General Public License version 3
+
+--------------------------------------------------------------------------------
+Disclaimer
+--------------------------------------------------------------------------------
+
+Recently I bought a Brother multifunction printer and was impressed by the Linux
+support Brother apparently is providing. The device just worked. In addition,
+Brother offers a small tool brscan-skey which makes it possible to initiate
+scans via the printer's scan key.
+
+I created this program because...
+ ...brscan-skey is just a binary and I didn't want to install it on my server;
+ ...the tool intrigued me -- how does it work?
+
+brotherscankeyd is distributed in the hope that it will be of help. It comes
+with absolutely no warranty (see license info above).
+
+--------------------------------------------------------------------------------
+Description
+--------------------------------------------------------------------------------
+
+This program offers a network service to execute scripts/programs if a scan key
+event occurs. It registers scan-to entries on one or more network printers and
+listens to UDP packets coming from the devices. If a known scan key action is
+registered, the corresponding script is called.
+
+
+--------------------------------------------------------------------------------
+Requirements
+--------------------------------------------------------------------------------
+
+Which programs and libraries are needed?
+(In parantheses: Gentoo Linux versions this program was created/tested with)
+
+Python3  (3.4.3-r1)
+pysnmp   (4.2.5)
+linuxfd  (1.0, cf. https://www.github.com/abelbeck/linuxfd)
+
+--------------------------------------------------------------------------------
+Installation
+--------------------------------------------------------------------------------
+
+Place the files in the following directories:
+
+   /usr/local/bin/brotherscankeyd.py
+   /usr/local/etc/brotherscankeyd.ini
+   /usr/local/share/brotherscankeyd/scan2image.sh
+   /usr/local/share/brotherscankeyd/scan2pdf.sh
+
+Then you should edit brotherscankeyd.ini to reflect your system's configuration.
+
+--------------------------------------------------------------------------------
+Usage
+--------------------------------------------------------------------------------
+
+The service is started by calling brotherscankeyd.py with the start or daemonise
+command. The latter will detach the program from the controlling terminal, thus
+daemonising it.
+
+Calling brotherscankeyd.py stop will stop the daemon. To control this behaviour,
+the PID file /tmp/brotherscankeyd.pid is created.
+
+For further information, please consult the program's internal help system.
+
+--------------------------------------------------------------------------------
+Files
+--------------------------------------------------------------------------------
+
+brotherscankeyd.py            main program
+brotherscankeyd.ini           default empty configuration file
+COPYING                       GPL v3 license text
+README                        (this file)
+scan2image.sh                 an example of a scan-to-image script
+scan2pdf.sh                   an example of a scan-to-PDF script
+
+--------------------------------------------------------------------------------
+Changelog
+--------------------------------------------------------------------------------
+
+2016-07-04: initial release as "works for me" version (except for the scan
+            scripts scan2image.sh and scan2pdf.sh; they are still untested)
+
