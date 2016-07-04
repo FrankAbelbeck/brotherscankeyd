@@ -3,13 +3,9 @@
 Brother Scan Key Daemon - brotherscankeyd
 Frank Abelbeck (c) 2016
 
-- Daemon registers itself with the scanner via SNMP (which events to watch)
-- Daemon listens for UDP packets originating at the scanner (actual event notifications)
-- Daemon acts according to its rules
-
-User = BlackBox
-Scan to Image ---> HiRes image scanning, output PNG file on server
-Scan to File ----> MedRes image scanning, output to PDF (OCRed) on server
+- Daemon registers itself with known Brother scanners via SNMP
+- Daemon listens for certain UDP packets (scan button notifications)
+- Daemon calls scripts according to its rules given in the configuation file
 """
 
 import sys,os.path,subprocess,argparse,configparser
@@ -18,6 +14,7 @@ import linuxfd
 import select
 import signal
 import syslog
+import shlex
 
 from pysnmp.entity.rfc3413.oneliner import cmdgen # one-liner SNMP commands
 from pysnmp.proto.rfc1902 import OctetString # create SNMP variable value strings
@@ -27,10 +24,11 @@ EPOLLRDHUP = 0x2000 # see /usr/include/sys/epoll.h, defined since kernel 2.6.17
 PIDFILE    = "/tmp/brotherscankeyd.pid"
 CONFIGFILE = "/usr/local/etc/brotherscankeyd.ini"
 
+
 class Daemon:
 	
 	def __init__(self):
-		"""Create a Daemon process on this machine, opening a free UDP port."""
+		"""Create a Daemon process on this machine."""
 		try:
 			# check if a PID file already exists
 			with open(PIDFILE,"r") as f:
@@ -49,11 +47,25 @@ class Daemon:
 	
 	
 	def print(self,priority=syslog.LOG_INFO,*args):
+		"""The daemon's own version of print(); acts like Python's print(), but also prints
+to syslog with given priority and facility "brotherscankeyd.py" if desired.
+
+Args:
+   priority: an interger; cf. syslog documentation for valid values.
+   *args: one or more Python types passed to print"""
 		if self._doLog:	syslog.syslog(priority," ".join(*args))
 		print(*args)
 	
 	
 	def start(self,configfile,port,doLog,daemonise=False):
+		"""Start the daemon.
+
+Args:
+   configfile: a file-type object refering to an existing configuration file.
+   port: an integer; the UDP port to be used by this daemon.
+   doLog: a boolean; if True, the daemon will print messages to syslog.
+   daemonise: a boolean; if True, the daemon will detach itself from the
+              controlling terminal and continue as a background process."""
 		if self._pid:
 			print("Won't start because there can be only one brotherscankeyd process.")
 			sys.exit(1)
@@ -65,20 +77,22 @@ class Daemon:
 			configfile = CONFIGFILE
 		try:
 			# parse config
-			cfg = configparser.RawConfigParser(defaults={"first cycle":3,"cycle":3600,"buffer size":4096})
+			cfg = configparser.RawConfigParser()
 			cfg.optionxform = lambda option: option # don't convert to lowercase
 			cfg.read_file(configfile)
-			self._firstcycle = int(cfg["General"]["first cycle"])
-			self._cycle      = int(cfg["General"]["cycle"])
-			self._buffersize = int(cfg["General"]["buffer size"])
+			self._firstcycle = cfg.getint("General","first cycle",fallback=3)
+			self._cycle      = cfg.getint("General","cycle",fallback=300)
+			self._buffersize = cfg.getint("General","buffer size",fallback=4096)
 			# obtain menu entries
 			self._config = dict()
 			for menutype in ("IMAGE","FILE","OCR","EMAIL"):
 				if menutype in cfg:
 					self._config[menutype] = dict()
 					for entry,path in cfg[menutype].items():
-						if os.path.isfile(path) and os.path.isabs(path):
-							self._config[menutype][entry] = path
+						pathargs = shlex.split(path)
+						script = pathargs[0]
+						if os.path.isfile(script) and os.path.isabs(script):
+							self._config[menutype][entry] = pathargs
 							print(" * Adding entry '{entry}' to scan-to-{type} menu...".format(entry=entry,type=menutype))
 		except (ValueError,TypeError,KeyError,configparser.Error):
 			# invalid config: since there are no scan targets further program execution is futile
@@ -159,7 +173,7 @@ class Daemon:
 	
 	
 	def stop(self):
-		# send stop message via SIGTERM signal
+		"""Stop the daemon by sending a SIGTERM signal"""
 		if self._pid:
 			os.kill(self._pid,signal.SIGTERM)
 			print("Sent SIGTERM to {0}".format(self._pid))
@@ -233,7 +247,7 @@ Raises:
 			raise ValueError
 	
 	
-	def snmpSetRequest(self,printerTransport,user,function):
+	def snmpSetRequest(self,printerTransport,function,user):
 		"""Issue an SNMP set request for a Brother variable in order to register with a
 printer's scan key.
 
@@ -242,8 +256,8 @@ According to a wireshark dump, SNMP version 1 is used with community "internal".
 Args:
    printerTransport: a pySNMP UdpTransportTarget object addressing the
                      printer's SNMP service; usually port 161 UDP is used.
-   user: a string; the target name shown on the printer's display.
    function: a string, either "IMAGE", "EMAIL", "OCR" or "FILE".
+   user: a string; the target name shown on the printer's display.
 
 Raises:
    ValueError: function not in set ("IMAGE","EMAIL","OCR","FILE").
@@ -305,29 +319,6 @@ Raises:
 		# and now block these signals
 		signal.pthread_sigmask(signal.SIG_SETMASK,{signal.SIGTERM,signal.SIGINT})
 		
-#
-# test routine: start daemon, register FILE and IMAGE entries,
-# do scan-to-image,
-# do scan-to-file,
-# do scan-to-file,
-# stop daemon
-#
-#Processing configuation file
-   #Adding entry 'Test entry' to scan-to-IMAGE menu...
-   #Adding entry 'Test entry' to scan-to-FILE menu...
-#Collecting list of active scanners on the net
-   #Adding device MFC-L2720DW (IP 192.168.1.3, address brother4:net1;dev0...
-#Opening UDP socket... done (192.168.1.31:54925)
-#sending SNMP SET request to 192.168.1.3:161...
-#incoming UDP packet: b'\x02\x00}0TYPE=BR;BUTTON=SCAN;USER="Test entry";FUNC=IMAGE;HOST=192.168.1.31:54925;APPNUM=1;P1=0;P2=0;P3=0;P4=0;REGID=13382;SEQ=3;' ('192.168.1.3', 58971)
-#incoming UDP packet: b'\x02\x00}0TYPE=BR;BUTTON=SCAN;USER="Test entry";FUNC=IMAGE;HOST=192.168.1.31:54925;APPNUM=1;P1=0;P2=0;P3=0;P4=0;REGID=13382;SEQ=3;' ('192.168.1.3', 58971)
-#incoming UDP packet: b'\x02\x00|0TYPE=BR;BUTTON=SCAN;USER="Test entry";FUNC=FILE;HOST=192.168.1.31:54925;APPNUM=5;P1=0;P2=0;P3=0;P4=0;REGID=13078;SEQ=4;' ('192.168.1.3', 51461)
-#incoming UDP packet: b'\x02\x00|0TYPE=BR;BUTTON=SCAN;USER="Test entry";FUNC=FILE;HOST=192.168.1.31:54925;APPNUM=5;P1=0;P2=0;P3=0;P4=0;REGID=13078;SEQ=4;' ('192.168.1.3', 51461)
-#incoming UDP packet: b'\x02\x00|0TYPE=BR;BUTTON=SCAN;USER="Test entry";FUNC=FILE;HOST=192.168.1.31:54925;APPNUM=5;P1=0;P2=0;P3=0;P4=0;REGID=13078;SEQ=5;' ('192.168.1.3', 57965)
-#incoming UDP packet: b'\x02\x00|0TYPE=BR;BUTTON=SCAN;USER="Test entry";FUNC=FILE;HOST=192.168.1.31:54925;APPNUM=5;P1=0;P2=0;P3=0;P4=0;REGID=13078;SEQ=5;' ('192.168.1.3', 57965)
-#sending SNMP SET request to 192.168.1.3:161...
-#received SIGTERM: terminating...
-		
 		# enter main loop
 		self.isrunning = True
 		while self.isrunning:
@@ -386,20 +377,16 @@ Raises:
 						except KeyError:
 							break # a deviced called in that is not registered? nevermind
 						try:
-							# call script in background, memorise PID?
-							process = subprocess.Popen(
-								[self._config[function][user],device],
-								stdout=subprocess.PIPE,
-								stderr=subprocess.PIPE,
-								universal_newlines=True
-							)
+							# call script as background process
+							command = list(self._config[function][user]) # copy script command
+							command.insert(1,device) # insert device name into script command
+							process = subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,universal_newlines=True)
 							processes[process.stdout.fileno()] = process
 							seqnum[process.stdout.fileno()] = seq
-							self._epoll.register(process.stdout.fileno(),select.EPOLLHUP)
+							self._epoll.register(process.stdout.fileno(),select.EPOLLHUP | EPOLLRDHUP)
 						except:
 							# either call() failed or no script is connected to said device/function/user:
 							# need to think of a way to send an error message to the scanner?
-							print(sys.exc_info())
 							pass
 				
 				elif fd in self._scanners:
@@ -411,7 +398,7 @@ Raises:
 					for function in self._config.keys():
 						for user in self._config[function].keys():
 							try:
-								self.snmpSetRequest(self._scanners[fd],user,function)
+								self.snmpSetRequest(self._scanners[fd],function,user)
 							except OSError:
 								pass
 				
@@ -458,39 +445,38 @@ if __name__ == '__main__':
 		description="Start or manage a Brother Scan Key Daemon.",
 		epilog="""Configuration file layout (ini file style):
    [General]
-   ; general parameters; example shows the default values 
-   ;   first cycle: delay in seconds until first SNMP request is sent
-   ;   cycle: delay in seconds between consecutive SNMP requests
-   ;   buffer size: number of bytes to read when new UDP packets arrive
+   ; General parameters; this example shows the default values;
+   ;   first cycle: delay in seconds until first SNMP request is sent;
+   ;   cycle: delay in seconds between consecutive SNMP requests;
+   ;   buffer size: number of bytes to read when new UDP packets arrive.
    first cycle = 3
-   cycle = 3600
+   cycle = 300
    buffer size = 4096
+   ; If one or all of these parameters are not defined, the program will fall
+   ; back to the default values.
    
-   ; what follows are optional entries for the scanner's various scan-to menus
-   ; definitions here will create an entry of given name below the given menu
-   ;
-   ; if called, a single parameter with the device name is passed to scanscript
-   ; any output of the script is written to stdout and/or syslog
+   ; What follows are optional entries for the scanner's various scan-to menus;
+   ; definitions here will create an entry of given name below the given menu.
+   ; When activated, the given _absolute_ script path is called and the device
+   ; address is passed as first argument; if any arguments are specified
+   ; (cf. FILE/"Another entry"), these will be passed as 2nd arg and following.
    
    ; menu: scan to file
    [FILE]
    Entry name = /absolute/path/to/scanscript
-   ...
+   Another entry = /absolute/path/to/scanscript arg1 arg2
 
    ; menu: scan to image
    [IMAGE]
    Entry name = /absolute/path/to/scanscript
-   ...
 
    ; menu: scan to OCR/text file
    [OCR]
    Entry name = /absolute/path/to/scanscript
-   ...
 
    ; menu: scan to e-mail
    [EMAIL]
    Entry name = /absolute/path/to/scanscript
-   ...
 """)
 	parser.add_argument("command",choices=("start","daemon","stop"),help="start, start daemonised or stop this daemon")
 	parser.add_argument("-c","--config",metavar="CFG",type=argparse.FileType("r"),help="load configuration file CFG")
