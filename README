@@ -105,6 +105,6 @@ scan2pdf.sh                   an example of a scan-to-PDF script
 Changelog
 --------------------------------------------------------------------------------
 
-2016-07-04: initial release as "works for me" version (except for the scan
+2016-07-05: initial release as "works for me" version (except for the scan
             scripts scan2image.sh and scan2pdf.sh; they are still untested)
 

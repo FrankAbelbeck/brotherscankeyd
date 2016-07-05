@@ -20,6 +20,9 @@
 #
 # usage: scan2pdf.sh devicename [odd|even] [reversed]
 #
+if [ $# -eq 0 ]; then
+	exit 1
+fi
 
 #
 # create unique filename from date and if necessary from an index

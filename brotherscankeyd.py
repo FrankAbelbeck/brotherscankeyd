@@ -29,6 +29,7 @@ from pysnmp.entity.rfc3413.oneliner import cmdgen # one-liner SNMP commands
 from pysnmp.proto.rfc1902 import OctetString # create SNMP variable value strings
 import pysnmp.error
 import pysnmp.carrier.error
+import pyasn1.error
 
 EPOLLRDHUP = 0x2000 # see /usr/include/sys/epoll.h, defined since kernel 2.6.17
 PIDFILE    = "/tmp/brotherscankeyd.pid"
@@ -48,7 +49,9 @@ CONFIGHELP = """Configuration file layout (ini file style):
    ; back to the default values.
    
    [Device Name]
-   ; definition of device "Device Name"
+   ; Definition of a device "Device Name".
+   ; (any leading/trailing whitespace characters of the name are ignored)
+   ; If no devices are specified, the program will terminate (nothing to do).
    ip = hostname.or.ip.address
    dev = sane device address
    
@@ -60,8 +63,14 @@ CONFIGHELP = """Configuration file layout (ini file style):
    ; (cf. FILE/"Another entry"), these will be passed as 2nd arg and following.
    ;
    ; To define a device-specific menu entry, prepend a colon : and the device
-   ; name (see above) to FILE|IMAGE|OCR|EMAIL (cf. entry OCR)
-   
+   ; name (see above) to FILE|IMAGE|OCR|EMAIL (cf. example entry OCR).
+   ;
+   ; Any leading/trailing whitespace characters of the section name or its
+   ; device/menu names are ignored).
+   ;
+   ; If no entries are specified, or entries refer non-existing devices,
+   ; the program will terminate (nothing to do).
+   ;
    ; menu: scan to file
    [FILE]
    Entry name = /absolute/path/to/scanscript
@@ -156,14 +165,20 @@ Args:
 			self._timers = dict()
 			
 			secDevs  = list()
-			secRules = list()
+			secEntries = list()
 			for section in cfg.sections():
+				try:
+					dev,sec = [i.strip() for i in section.rsplit(":",1)]
+				except ValueError:
+					# no : inside section --> no device namespace
+					dev,sec = "",section.strip()
 				if section == "General":
 					# ignore general parameters, already processed
 					continue
-				elif section in ("IMAGE","FILE","OCR","EMAIL") or section.endswith(":IMAGE") or section.endswith(":FILE") or section.endswith(":OCR") or section.endswith(":EMAIL"):
-					# section named IMAGE|FILE|OCR|EMAIL or ending in these strings: a menu definition, add to rules
-					secRules.append(section)
+				elif sec in ("IMAGE","FILE","OCR","EMAIL"):
+					# section named IMAGE|FILE|OCR|EMAIL or ending in these strings after a colon:
+					# a menu definition, strip leading and trailing whitespace and add to entries
+					secEntries.append(section)
 				elif "ip" in cfg[section].keys() and "dev" in cfg[section].keys():
 					# any remaining section containing fields "ip" and "dev" is a device definition
 					secDevs.append(section)
@@ -184,28 +199,39 @@ Args:
 						timer.settime(self._firstcycle,self._cycle)
 						# map scanner's IP address to a device name (used when processing notifications)
 						if cfg[device]["ip"] in self._devices or cfg[device]["dev"] in self._devices.values():
-							print(" * Not adding device {devname} because its parameters were already used")
+							print("Not adding device {devname} (parameters already in use)".format(devname=device))
 						else:
 							self._devices[cfg[device]["ip"]] = cfg[device]["dev"]
 							devips[device] = cfg[device]["ip"]
 							devnames[cfg[device]["ip"]] = device
-							print(" * Adding device {devname} (IP={ip},dev={address})...".format(devname=device,ip=cfg[device]["ip"],address=cfg[device]["dev"]))
+							print("Adding device {devname} (IP={ip},dev={address})...".format(devname=device,ip=cfg[device]["ip"],address=cfg[device]["dev"]))
 					except (pysnmp.error.PySnmpError,OSError):
 						# pysnmp: transport target could not be set up
 						# OSError: timer creation failed
 						# in any case: don't add device
+						print("Not adding device {devname} (erroneous definition)".format(devname=device))
 						pass
 			
-			# iterate over all rule definitions
+			if len(devips) == 0:
+				print("No devices defined. Nothing to do, terminating.")
+				sys.exit(0)
+			
+			# iterate over all entry definitions
 			self._config = dict()
-			for menutype in secRules:
+			for menutype in secEntries:
 				try:
-					devname,menu = menutype.rsplit(":",1)
+					devname,menu = [i.strip() for i in menutype.rsplit(":",1)]
 					devs = [devips[devname]]
 				except ValueError:
 					# tuple unpacking failed: must be a global IMAGE|FILE|OCR|EMAIL
+					menutype.strip()
 					menu = menutype
 					devs = self._devices.keys()
+				except KeyError:
+					# unknown device: ignore
+					print("Ignoring entry definition {device} / {menu} (device unknown)".format(device=devname,menu=menu))
+					continue
+				
 				# iterate over all found devices
 				for dev in devs:
 					# iterate over all entries beneath the menu type
@@ -214,6 +240,13 @@ Args:
 						script = pathargs[0] # isolate script name
 						if os.path.isfile(script) and os.path.isabs(script):
 							# script file exists: create entry
+							# check if entry name can be expressed as octet string
+							# (i.e. can be presented in us-ascii)
+							try:
+								OctetString(entry)
+							except pyasn1.error.PyAsn1Error:
+								print("Ignoring entry {device} / {menu} / {entry} (entry not encodable with us-ascii)".format(entry=entry,menu=menu,device=devnames[dev]))
+								continue
 							try:
 								# add path to script for this device's menu entry
 								self._config[dev][menu][entry] = pathargs
@@ -229,7 +262,21 @@ Args:
 									self._config[dev] = dict()
 									self._config[dev][menu] = dict()
 									self._config[dev][menu][entry] = pathargs
-							print(" * Adding entry {device} / {menu} / {entry}...".format(entry=entry,menu=menu,device=devnames[dev]))
+							print("Adding entry {device} / {menu} / {entry}...".format(entry=entry,menu=menu,device=devnames[dev]))
+			
+			# clean up device list: remove devices without any entry definitions
+			for dev in tuple(self._devices.keys()):
+				if dev not in self._config:
+					print("Removing unused device",devnames[dev])
+					del self._devices[dev]
+			
+			if len(self._devices) == 0:
+				print("Final device list is empty. Nothing to do, terminating.")
+				sys.exit(0)
+			elif len(self._config) == 0:
+				print("Final entry list is empty. Nothing to do, terminating.")
+				sys.exit(0)
+			
 		except configparser.DuplicateSectionError:
 			# one duplicate section found: invalid config, exit with error
 			print("Duplicate Section found in configuration file. Terminating.")
@@ -247,12 +294,11 @@ Args:
 		self._community = cmdgen.CommunityData("internal", mpModel=0) # mpModel == 0 --> SNMP version 1 
 		
 		# create non-blocking server socket
+		print("Opening UDP socket...",end="")
 		try:
 			if not hostname:
 				# no hostname argument given: try to obtain it automatically
 				hostname = socket.gethostbyname(socket.gethostname())
-			
-			print("Opening UDP socket...",end="")
 			self._socket_server = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 			self._socket_server.bind(( hostname,port ))
 			self._socket_server.setblocking(False)
@@ -372,7 +418,6 @@ Raises:
    OSError: an SNMP error occured.
    pysnmp.error.PySnmpError: malformed printer address or an SNMP error occured."""
 		appnum = self.genAppNum(function)
-		
 		errIndication, errStatus, errIndex, varBinds = self._generator.setCmd(
 			self._community,
 			printerTransport,
