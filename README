@@ -24,7 +24,7 @@ General information
 --------------------------------------------------------------------------------
 
 Author:  Frank Abelbeck
-Version: 2016-07-04
+Version: 2016-07-05-ALPHA
 Licence: GNU General Public License version 3
 
 --------------------------------------------------------------------------------
@@ -49,9 +49,8 @@ Description
 
 This program offers a network service to execute scripts/programs if a scan key
 event occurs. It registers scan-to entries on one or more network printers and
-listens to UDP packets coming from the devices. If a known scan key action is
+listens to UDP packets coming from these devices. If a known scan key action is
 registered, the corresponding script is called.
-
 
 --------------------------------------------------------------------------------
 Requirements
