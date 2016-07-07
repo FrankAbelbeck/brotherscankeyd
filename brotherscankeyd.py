@@ -604,13 +604,13 @@ and you are welcome to redistribute it under certain conditions
 (see command "license" for details)."""
 	)
 	parser.add_argument("command",choices=("start","daemon","stop","license","config"),help="start, start daemonised or stop this daemon, show more license information or print help on the configuration file format")
-	parser.add_argument("-c","--config",metavar="CFG",type=argparse.FileType("r"),help="load configuration file CFG")
+	parser.add_argument("--config",metavar="CFG",type=argparse.FileType("r"),help="load configuration file CFG")
 	# default port 54925: it seems Brother scanners address their notifications to this UDP port,
 	# ignoring the port value passed via SNMP request?
 	# cf. Brother website: 54925 = scanning, 54926 = PC fax receiving
-	parser.add_argument("-a","--address",metavar="ADDRESS",help="use hostname ADDRESS (default: try to determine the hostname/IPv4 automatically)")
-	parser.add_argument("-p","--port",metavar="PORT",type=int,default=54925,help="use UDP port PORT (default: %(default)s)")
-	parser.add_argument("-s","--syslog",action='store_true',help="write information to syslog")
+	parser.add_argument("--address",metavar="ADDRESS",help="use hostname ADDRESS (default: try to determine hostname/IPv4 automatically)")
+	parser.add_argument("--port",metavar="PORT",type=int,default=54925,help="use UDP port PORT (default: %(default)s)")
+	parser.add_argument("--syslog",action='store_true',help="write information to syslog")
 	args = parser.parse_args()
 	
 	if args.command == "license":
