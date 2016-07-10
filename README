@@ -24,7 +24,7 @@ General information
 --------------------------------------------------------------------------------
 
 Author:  Frank Abelbeck
-Version: 2016-07-05-ALPHA
+Version: 2016-07-10-ALPHA
 Licence: GNU General Public License version 3
 
 --------------------------------------------------------------------------------
@@ -85,7 +85,8 @@ command. The latter will detach the program from the controlling terminal, thus
 daemonising it.
 
 Calling brotherscankeyd.py stop will stop the daemon. To control this behaviour,
-the PID file /tmp/brotherscankeyd.pid is created.
+the PID file /var/run/brotherscankeyd.pid is created. If this is not possible,
+perhaps due to denied permission, the PID is placed in /tmp/brotherscankeyd.pid.
 
 For further information, please consult the program's internal help system.
 
@@ -107,3 +108,8 @@ Changelog
 2016-07-05: initial release as "works for me" version (except for the scan
             scripts scan2image.sh and scan2pdf.sh; they are still untested)
 
+2016-07-10: switched to a unified output system (Python module logging and
+            custom ConsoleHandler for coloured output);
+            moved CONFIGFILE and PIDFILE to standard locations /etc and
+            /var/run respectively (program tries both paths);
+            scan2* scripts revisited, now seem to work; various bug fixes

@@ -31,20 +31,28 @@ import pysnmp.error
 import pysnmp.carrier.error
 import pyasn1.error
 
+import logging
+import logging.handlers
+
 EPOLLRDHUP = 0x2000 # see /usr/include/sys/epoll.h, defined since kernel 2.6.17
-PIDFILE    = "/tmp/brotherscankeyd.pid"
-CONFIGFILE = "/usr/local/etc/brotherscankeyd.ini"
+PIDFILE    = "/var/run/brotherscankeyd.pid"
+TMPPIDFILE = "/tmp/brotherscankeyd.pid" # fallback if /var/run is not accessible
+CONFIGFILE = "/etc/brotherscankeyd.ini"
+LOGDEV     = "/dev/log"
 
 CONFIGHELP = """Configuration file layout (ini file style):
 
    [General]
-   ; General parameters; this example shows the default values;
+   ; General parameters; this example shows the default values if a parameter is
+   ; not specified
    ;   first cycle: delay in seconds until first SNMP request is sent;
    ;   cycle: delay in seconds between consecutive SNMP requests;
    ;   buffer size: number of bytes to read when new UDP packets arrive.
    first cycle = 3
    cycle = 300
    buffer size = 4096
+   hostname = <try to determine own IPv4 automatically>
+   port = 54925
    ; If one or all of these parameters are not defined, the program will fall
    ; back to the default values.
    
@@ -89,37 +97,53 @@ CONFIGHELP = """Configuration file layout (ini file style):
    Entry name = /absolute/path/to/scanscript
 """
 
+class ConsoleHandler(logging.StreamHandler):
+	
+	def __init__(self):
+		super().__init__(sys.stdout)
+		formatter = logging.Formatter("%(message)s")
+		self.setFormatter(formatter)
+		
+	def format(self,record):
+		message = super().format(record)
+		if record.levelno == logging.INFO:
+			return "\033[0m{0}\033[0m".format(message)
+			#return "\033[97m{0}\033[0m".format(message)
+		elif record.levelno == logging.WARNING:
+			return "\033[93m{0}\033[0m".format(message)
+		elif record.levelno >= logging.ERROR:
+			return "\033[91m{0}\033[0m".format(message)
+
 
 class Daemon:
 	
-	def __init__(self):
+	def __init__(self,logger):
 		"""Create a Daemon process on this machine."""
 		try:
 			# check if a PID file already exists
 			with open(PIDFILE,"r") as f:
 				self._pid = int(f.read())
+				pidfile = PIDFILE
+		except FileNotFoundError:
+			# standard PID file not found
+			# perhaps a former instance used TMPPIDFILE?
+			try:
+				with open(TMPPIDFILE,"r") as f:
+					self._pid = int(f.read())
+					pidfile = TMPPIDFILE
+			except FileNotFoundError:
+				# still no PID file: reset _pid
+				self._pid = None
+		
+		if self._pid:
 			# check if given PID points to an existing process
 			if subprocess.call(["/bin/ps","--pid",str(self._pid)],stdout=subprocess.DEVNULL) > 0:
 				# /bin/ps failed: there is no process with this PID;
 				# assume invalid PID file: remove it, reset _pid
-				os.remove(PIDFILE)
+				os.remove(pidfile) # this might fail if PIDFILE is not accessible
 				self._pid = None
-		except FileNotFoundError:
-			# no PID file: reset _pid
-			self._pid = None
-		self._doLog = False
-		syslog.openlog("brotherscankeyd.py",syslog.LOG_PID,syslog.LOG_DAEMON)
-	
-	
-	def print(self,priority=syslog.LOG_INFO,*args):
-		"""The daemon's own version of print(); acts like Python's print(), but also prints
-to syslog with given priority and facility "brotherscankeyd.py" if desired.
-
-Args:
-   priority: an interger; cf. syslog documentation for valid values.
-   *args: one or more Python types passed to print"""
-		if self._doLog:	syslog.syslog(priority," ".join(*args))
-		print(*args)
+		
+		self._logger = logger
 	
 	
 	def start(self,configfile,hostname,port,doLog,daemonise=False):
@@ -132,11 +156,21 @@ Args:
    daemonise: a boolean; if True, the daemon will detach itself from the
               controlling terminal and continue as a background process."""
 		if self._pid:
-			print("Won't start because there can be only one brotherscankeyd process.")
+			self._logger.error("Won't start because there can be only one brotherscankeyd process.")
 			sys.exit(1)
 		
+		# modify logger if syslogging is desired
+		if doLog:
+			syslogger = logging.handlers.SysLogHandler(address=LOGDEV)
+			syslogger.setLevel(logging.DEBUG)
+			# format for metalog: "time name: message"
+			sysformatter = logging.Formatter('%(asctime)s %(name)s: %(message)s')
+			syslogger.setFormatter(sysformatter)
+			syslogger.ident = self._logger.name
+			self._logger.addHandler(syslogger)
+		
 		# process program configuration
-		print("Processing configuation file")
+		self._logger.info("Processing configuation file")
 		if not configfile:
 			# no config file given: fall back to default config file in /etc
 			configfile = CONFIGFILE
@@ -158,6 +192,8 @@ Args:
 			self._firstcycle = cfg.getint("General","first cycle",fallback=3)
 			self._cycle      = cfg.getint("General","cycle",fallback=300)
 			self._buffersize = cfg.getint("General","buffer size",fallback=4096)
+			hostname = cfg.get("General","hostname",fallback=hostname)
+			port = cfg.getint("General","port",fallback=port)
 			
 			# collect all device sections
 			self._scanners = dict()
@@ -199,21 +235,21 @@ Args:
 						timer.settime(self._firstcycle,self._cycle)
 						# map scanner's IP address to a device name (used when processing notifications)
 						if cfg[device]["ip"] in self._devices or cfg[device]["dev"] in self._devices.values():
-							print("Not adding device {devname} (parameters already in use)".format(devname=device))
+							self._logger.warning("Not adding device {devname} (parameters already in use)".format(devname=device))
 						else:
 							self._devices[cfg[device]["ip"]] = cfg[device]["dev"]
 							devips[device] = cfg[device]["ip"]
 							devnames[cfg[device]["ip"]] = device
-							print("Adding device {devname} (IP={ip},dev={address})...".format(devname=device,ip=cfg[device]["ip"],address=cfg[device]["dev"]))
+							self._logger.info("Adding device {devname} (IP={ip},dev={address})...".format(devname=device,ip=cfg[device]["ip"],address=cfg[device]["dev"]))
 					except (pysnmp.error.PySnmpError,OSError):
 						# pysnmp: transport target could not be set up
 						# OSError: timer creation failed
 						# in any case: don't add device
-						print("Not adding device {devname} (erroneous definition)".format(devname=device))
+						self._logger.warning("Not adding device {devname} (erroneous definition)".format(devname=device))
 						pass
 			
 			if len(devips) == 0:
-				print("No devices defined. Nothing to do, terminating.")
+				self._logger.info("No devices defined. Nothing to do, terminating.")
 				sys.exit(0)
 			
 			# iterate over all entry definitions
@@ -229,7 +265,7 @@ Args:
 					devs = self._devices.keys()
 				except KeyError:
 					# unknown device: ignore
-					print("Ignoring entry definition {device} / {menu} (device unknown)".format(device=devname,menu=menu))
+					self._logger.warning("Ignoring entry definition {device} / {menu} (device unknown)".format(device=devname,menu=menu))
 					continue
 				
 				# iterate over all found devices
@@ -245,7 +281,7 @@ Args:
 							try:
 								OctetString(entry)
 							except pyasn1.error.PyAsn1Error:
-								print("Ignoring entry {device} / {menu} / {entry} (entry not encodable with us-ascii)".format(entry=entry,menu=menu,device=devnames[dev]))
+								self._logger.warning("Ignoring entry {device} / {menu} / {entry} (entry not encodable with us-ascii)".format(entry=entry,menu=menu,device=devnames[dev]))
 								continue
 							try:
 								# add path to script for this device's menu entry
@@ -262,31 +298,31 @@ Args:
 									self._config[dev] = dict()
 									self._config[dev][menu] = dict()
 									self._config[dev][menu][entry] = pathargs
-							print("Adding entry {device} / {menu} / {entry}...".format(entry=entry,menu=menu,device=devnames[dev]))
+							self._logger.info("Adding entry {device} / {menu} / {entry}...".format(entry=entry,menu=menu,device=devnames[dev]))
 			
 			# clean up device list: remove devices without any entry definitions
 			for dev in tuple(self._devices.keys()):
 				if dev not in self._config:
-					print("Removing unused device",devnames[dev])
+					self._logger.info("Removing unused device",devnames[dev])
 					del self._devices[dev]
 			
 			if len(self._devices) == 0:
-				print("Final device list is empty. Nothing to do, terminating.")
+				self._logger.info("Final device list is empty. Nothing to do, terminating.")
 				sys.exit(0)
 			elif len(self._config) == 0:
-				print("Final entry list is empty. Nothing to do, terminating.")
+				self._logger.info("Final entry list is empty. Nothing to do, terminating.")
 				sys.exit(0)
 			
 		except configparser.DuplicateSectionError:
 			# one duplicate section found: invalid config, exit with error
-			print("Duplicate Section found in configuration file. Terminating.")
+			self._logger.error("Duplicate Section found in configuration file. Terminating.")
 			sys.exit(1)
 		except (ValueError,TypeError,KeyError,configparser.Error):
 			# invalid config: since there are no scan targets further program execution is futile
 			if os.path.isfile(configfile):
-				print("Error reading the configuration file. Terminating.")
+				self._logger.error("Error reading the configuration file. Terminating.")
 			else:
-				print("Default configuration file {} missing. Terminating.".format(CONFIGFILE))
+				self._logger.error("Default configuration file {} missing. Terminating.".format(CONFIGFILE))
 			sys.exit(1)
 		
 		# prepare SNMP generator
@@ -294,7 +330,6 @@ Args:
 		self._community = cmdgen.CommunityData("internal", mpModel=0) # mpModel == 0 --> SNMP version 1 
 		
 		# create non-blocking server socket
-		print("Opening UDP socket...",end="")
 		try:
 			if not hostname:
 				# no hostname argument given: try to obtain it automatically
@@ -304,23 +339,23 @@ Args:
 			self._socket_server.setblocking(False)
 			# read back actual hostname/port information
 			self._hostname,self._port = self._socket_server.getsockname()
-			print(" done ({0}:{1})".format(self._hostname,self._port))
+			self._logger.info("Opened UDP socket at {0}:{1}".format(self._hostname,self._port))
 		except OSError as e:
 			if e.errno == errno.EADDRINUSE: # error: address already in use
 				# another process is using this address
-				print("Address {hostname} already in use!".format(hostname=self._hostname))
+				self._logger.error("Address {hostname} already in use!".format(hostname=self._hostname))
 				sys.exit(1)
 			elif e.errno == errno.EACCES: # error: permission denied
 				# most probably a port <1024 should be bound by a non-root process
-				print("Permission denied!")
+				self._logger.error("Permission denied!")
 				sys.exit(1)
 			elif isinstance(e,socket.gaierror):
 				# unexpected error...
-				print("Socket error:",e)
+				self._logger.error("Socket error:",e)
 				sys.exit(1)
 		
 		if daemonise:
-			print("Daemonising...")
+			self._logger.info("Daemonising...")
 			self.daemonise() # detach from terminal
 		
 		self.main() # start main loop
@@ -330,9 +365,9 @@ Args:
 		"""Stop the daemon by sending a SIGTERM signal"""
 		if self._pid:
 			os.kill(self._pid,signal.SIGTERM)
-			print("Sent SIGTERM to {0}".format(self._pid))
+			self._logger.info("Sent SIGTERM to {0}".format(self._pid))
 		else:
-			print("There is no process to terminate.")
+			self._logger.info("There is no process to terminate.")
 	
 	
 	def daemonise(self):
@@ -435,10 +470,10 @@ Raises:
 			)
 		)
 		if errIndication:
-			self.print(syslog.LOG_ERR,errIndication)
+			self._logger.error(errIndication)
 		else:
 			if errStatus:
-				self.print(syslog.LOG_ERR,"{} at {}".format(errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
+				self._logger.error("{} at {}".format(errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
 	
 	
 	def main(self):
@@ -446,8 +481,16 @@ Raises:
 		
 		# store the process identifier and create the PID file
 		self._pid = os.getpid()
-		with open(PIDFILE,"w") as f:
-			f.write(str(self._pid))
+		try:
+			with open(PIDFILE,"w") as f:
+				f.write(str(self._pid))
+				pidfile = PIDFILE
+		except:
+			# writing failed, most likely: lacking permission to access PIDFILE
+			# fall back to TMPPIDFILE
+			with open(TMPPIDFILE,"w") as f:
+				f.write(str(self._pid))
+				pidfile = TMPPIDFILE
 		
 		# prepare asynchronous I/O using epoll
 		self._epoll = select.epoll()
@@ -493,8 +536,8 @@ Raises:
 					# server socket became readable: new input
 					#
 					data,address = self._socket_server.recvfrom(self._buffersize)
-					datastr = data.decode()
-					self.print(syslog.LOG_INFO,"incoming UDP packet:",data,address)
+					self._logger.debug("incoming UDP packet: data={0}, address={0}".format(data,address))
+					datastr = data.decode(errors="ignore")
 					try:
 						datadict = dict([i.split("=",1) for i in datastr[datastr.index("TYPE=BR;"):].split(";") if "=" in i])
 					except ValueError:
@@ -524,7 +567,7 @@ Raises:
 						# scan button message; appnum equivalent to function name
 						# correct hostname/port and sequence number not seen yet
 						# -> call a script associated with given function/user name
-						self.print(syslog.LOG_INFO,'scan button event "{0}/{1}" received from {2}'.format(function,user,address[0]))
+						self._logger.info('scan button event "{0}/{1}" received from {2}'.format(function,user,address[0]))
 						try:
 							device = self._devices[address[0]]
 						except KeyError:
@@ -548,7 +591,7 @@ Raises:
 					#
 					self._timers[fd].read() # read timer to disarm epoll on this fd
 					hostname,port = self._scanners[fd].getTransportInfo()[1]
-					self.print(syslog.LOG_INFO,"sending SNMP SET request to {0}:{1}...".format(hostname,port))
+					self._logger.info("sending SNMP SET request to {0}:{1}...".format(hostname,port))
 					for function in self._config[hostname].keys():
 						for user in self._config[hostname][function].keys():
 							try:
@@ -560,13 +603,18 @@ Raises:
 					#
 					# process management: stdout of a process hung up
 					#
-					if processes[fd].poll() != None:
-						# process has not yet terminated, but stdout hung up: zombie? kill it
-						processes[fd].kill()
-					# print stdout and sterr, reps.
-					self.print(syslog.LOG_INFO,processes[fd].stdout.read())
+					if processes[fd].poll() == None:
+						# returncode None: process has not yet terminated,
+						# but stdout hung up; zombie? kill it!
+						try:
+							processes[fd].kill()
+						except ProcessLookupError:
+							pass # process has terminated, ignore
+						except:
+							self._logger.exception("Potential problem with script PID={0}".format(processes[fd].pid))
+					self._logger.debug(processes[fd].stdout.read())
 					if processes[fd].returncode != 0:
-						self.print(syslog.LOG_ERR,processes[fd].stderr.read())
+						self._logger.err(processes[fd].stderr.read())
 					# unregister stdout fileno
 					self._epoll.unregister(fd)
 					# remove from list
@@ -581,21 +629,21 @@ Raises:
 						siginfo = self._signalfile.read()
 						if siginfo["signo"] == signal.SIGTERM:
 							# should terminate: end loop
-							self.print(syslog.LOG_INFO,"received SIGTERM: terminating...")
+							self._logger.info("received SIGTERM: terminating...")
 							self.isrunning = False
 						# SIGINT is silently ignored
 					except:
 						pass
 		
 		# daemon is terminating...
-		os.remove(PIDFILE)
+		os.remove(pidfile)
 		syslog.closelog()
 
 
 if __name__ == '__main__':
 	# setup argument parser and parse commandline arguments
 	parser = argparse.ArgumentParser(
-		formatter_class=argparse.RawDescriptionHelpFormatter,
+		#formatter_class=argparse.RawDescriptionHelpFormatter,
 		description="Start or manage a Brother Scan Key Daemon.",
 		epilog="""Copyright (C) 2016 Frank Abelbeck <frank.abelbeck@googlemail.com>
 
@@ -610,20 +658,35 @@ and you are welcome to redistribute it under certain conditions
 	# cf. Brother website: 54925 = scanning, 54926 = PC fax receiving
 	parser.add_argument("--address",metavar="ADDRESS",help="use hostname ADDRESS (default: try to determine hostname/IPv4 automatically)")
 	parser.add_argument("--port",metavar="PORT",type=int,default=54925,help="use UDP port PORT (default: %(default)s)")
-	parser.add_argument("--syslog",action='store_true',help="write information to syslog")
+	parser.add_argument("--syslog",action='store_true',help="write messages to syslog")
+	parser.add_argument("--verbose",action='store_true',help="also write DEBUG messages to stdout")
 	args = parser.parse_args()
+	
+	logger = logging.getLogger('brotherscankeyd')
+	if args.verbose:
+		logger.setLevel(logging.DEBUG)
+	else:
+		logger.setLevel(logging.INFO)
+	cliHandler = ConsoleHandler()
+	logger.addHandler(cliHandler)
 	
 	if args.command == "license":
 		# print license information and exit successfully
-		print(LICENSE)
+		logger.info(LICENSE)
 		sys.exit(0)
 	elif args.command == "config":
 		# print help on the configuration file format and exit successfully
-		print(CONFIGHELP)
+		logger.info(CONFIGHELP)
 		sys.exit(0)
 	
 	# create daemon and execute given command
-	daemon = Daemon()
+	try:
+		daemon = Daemon(logger)
+	except FileNotFoundError:
+		# constructor failed due to PID file access: report and exit
+		logger.error("PID file could not be removed; perhaps it is a permission problem?")
+		sys.exit(1)
+	
 	if args.command == "start":
 		daemon.start(args.config,args.address,args.port,args.syslog)
 	elif args.command == "daemon":
