@@ -18,21 +18,32 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>."""
 
 import sys,os,os.path,subprocess,argparse,configparser
 import socket
-import linuxfd
+
 import select
 import signal
 import syslog
 import shlex
 import errno
 
-from pysnmp.entity.rfc3413.oneliner import cmdgen # one-liner SNMP commands
-from pysnmp.proto.rfc1902 import OctetString # create SNMP variable value strings
-import pysnmp.error
-import pysnmp.carrier.error
-import pyasn1.error
+try:
+	from pysnmp.entity.rfc3413.oneliner import cmdgen # one-liner SNMP commands
+	from pysnmp.proto.rfc1902 import OctetString # create SNMP variable value strings
+	import pysnmp.error
+	import pysnmp.carrier.error
+	import pyasn1.error
+except ImportError:
+	print("Required Python module: pysnmp.")
+	sys.exit(1)
 
 import logging
 import logging.handlers
+
+try:
+	import linuxfd
+except ImportError:
+	print("Required Python module: linuxfd.")
+	sys.exit(1)
+
 
 EPOLLRDHUP = 0x2000 # see /usr/include/sys/epoll.h, defined since kernel 2.6.17
 PIDFILE    = "/var/run/brotherscankeyd.pid"
@@ -173,7 +184,7 @@ Args:
 		self._logger.info("Processing configuation file")
 		if not configfile:
 			# no config file given: fall back to default config file in /etc
-			configfile = CONFIGFILE
+			configfile = open(CONFIGFILE,"r")
 		try:
 			# parse config
 			cfg = configparser.RawConfigParser()
@@ -299,11 +310,14 @@ Args:
 									self._config[dev][menu] = dict()
 									self._config[dev][menu][entry] = pathargs
 							self._logger.info("Adding entry {device} / {menu} / {entry}...".format(entry=entry,menu=menu,device=devnames[dev]))
+						else:
+							# script file does not exist or is not an absolute path
+							self._logger.warning("Ignoring entry {device} / {menu} / {entry} (script not found)".format(entry=entry,menu=menu,device=devnames[dev]))
 			
 			# clean up device list: remove devices without any entry definitions
 			for dev in tuple(self._devices.keys()):
 				if dev not in self._config:
-					self._logger.info("Removing unused device",devnames[dev])
+					self._logger.info("Removing unused device {0}".format(devnames[dev]))
 					del self._devices[dev]
 			
 			if len(self._devices) == 0:

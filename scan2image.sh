@@ -28,12 +28,12 @@ fi
 # create unique filename from date and if necessary from an index
 #
 DATE="$(/bin/date +%Y-%m-%d)"
-FILENAME="/tmp/"$DATE"_scan.tiff"
+FILENAME="/mnt/data/Scan/"$DATE"_scan.tiff"
 N=-1
 while [ -e $FILENAME ]; do
 	# filename already exists: increment counter, try again
 	let "N++"
-	FILENAME="/tmp/"$DATE"_scan_$N.tiff"
+	FILENAME="/mnt/data/Scan/"$DATE"_scan_$N.tiff"
 done
 
 if [ -n "$2" ]; then

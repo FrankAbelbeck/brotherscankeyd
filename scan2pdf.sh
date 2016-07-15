@@ -33,13 +33,13 @@ else
 	SUFFIX=""
 fi
 
-BASENAME="/tmp/$(/bin/date +%Y-%m-%d)_scan"
+BASENAME="/mnt/data/Scan/$(/bin/date +%Y-%m-%d)_scan"
 FILENAME="$BASENAME$SUFFIX.pdf"
 N=-1
 while [ -e $FILENAME ]; do
 	# filename already exists: increment counter, try again
 	let "N++"
-	FILENAME="/tmp/"$BASENAME$SUFFIX"_$N.pdf"
+	FILENAME="$BASENAME$SUFFIX"_$N.pdf"
 done
 
 # perform the scan:
@@ -62,13 +62,13 @@ if [ -n "$SUFFIX" ]; then
 	if [ -n "$ODDFILE" -a -n "$EVENFILE" ]; then
 		# odd and even file found
 		# create unique target name
-		BASENAME="/tmp/$(/bin/date +%Y-%m-%d)_scan"
+		BASENAME="/mnt/data/Scan/$(/bin/date +%Y-%m-%d)_scan"
 		FILENAME="$BASENAME.pdf"
 		N=-1
 		while [ -e $FILENAME ]; do
 			# filename already exists: increment counter, try again
 			let "N++"
-			FILENAME="/tmp/"$BASENAME"_$N.pdf"
+			FILENAME="$BASENAME"_$N.pdf"
 		done
 		# shuffle odd and even into one document
 		# take into account reversing the staple?
