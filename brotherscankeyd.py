@@ -117,7 +117,7 @@ class ConsoleHandler(logging.StreamHandler):
 		
 	def format(self,record):
 		message = super().format(record)
-		if record.levelno == logging.INFO:
+		if record.levelno <= logging.INFO:
 			return "\033[0m{0}\033[0m".format(message)
 			#return "\033[97m{0}\033[0m".format(message)
 		elif record.levelno == logging.WARNING:
@@ -285,6 +285,8 @@ Args:
 					for entry,path in cfg[menutype].items():
 						pathargs = shlex.split(path) # split path according to BASh syntax
 						script = pathargs[0] # isolate script name
+						pathargs.insert(1,shlex.quote(self._devices[dev])) # inject device name (quoted)
+						pathargs = " ".join(pathargs) # DEBUG: shell=True --> reconstruct argument string
 						if os.path.isfile(script) and os.path.isabs(script):
 							# script file exists: create entry
 							# check if entry name can be expressed as octet string
@@ -484,10 +486,10 @@ Raises:
 			)
 		)
 		if errIndication:
-			self._logger.error(errIndication)
+			self._logger.debug(errIndication)
 		else:
 			if errStatus:
-				self._logger.error("{} at {}".format(errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
+				self._logger.debug("{} at {}".format(errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
 	
 	
 	def main(self):
@@ -588,16 +590,21 @@ Raises:
 							break # a deviced called in that is not registered? nevermind
 						try:
 							# call script as background process
-							command = list(self._config[address[0]][function][user]) # copy script command
-							command.insert(1,device) # insert device name into script command
-							process = subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,universal_newlines=True)
+							self._logger.debug("script call: {0}".format(self._config[address[0]][function][user]))
+							process = subprocess.Popen(
+								self._config[address[0]][function][user],
+								stdout=subprocess.PIPE,
+								stderr=subprocess.PIPE,
+								universal_newlines=True,
+								shell=True
+							)
 							processes[process.stdout.fileno()] = process
 							seqnum[process.stdout.fileno()] = seq
 							self._epoll.register(process.stdout.fileno(),select.EPOLLHUP | EPOLLRDHUP)
 						except:
 							# either call() failed or no script is connected to said device/function/user:
 							# need to think of a way to send an error message to the scanner?
-							pass
+							self._logger.exception("Problem calling script {0}".format(self._config[address[0]][function][user]))
 				
 				elif fd in self._scanners:
 					#
@@ -605,7 +612,7 @@ Raises:
 					#
 					self._timers[fd].read() # read timer to disarm epoll on this fd
 					hostname,port = self._scanners[fd].getTransportInfo()[1]
-					self._logger.info("sending SNMP SET request to {0}:{1}...".format(hostname,port))
+					self._logger.debug("sending SNMP SET request to {0}:{1}...".format(hostname,port))
 					for function in self._config[hostname].keys():
 						for user in self._config[hostname][function].keys():
 							try:
@@ -628,7 +635,7 @@ Raises:
 							self._logger.exception("Potential problem with script PID={0}".format(processes[fd].pid))
 					self._logger.debug(processes[fd].stdout.read())
 					if processes[fd].returncode != 0:
-						self._logger.err(processes[fd].stderr.read())
+						self._logger.error(processes[fd].stderr.read())
 					# unregister stdout fileno
 					self._epoll.unregister(fd)
 					# remove from list

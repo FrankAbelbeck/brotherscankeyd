@@ -21,6 +21,16 @@
 # usage: scan2image.sh devicename [resolution]
 #
 if [ $# -eq 0 ]; then
+	cat <<ENDOFMSG
+Need at least one argument (SANE device address)!
+usage: scan2image.sh SANEADDRESS [RESOLUTION]
+       RESOLUTON defaults to 600 (dpi).
+ENDOFMSG
+	exit 1
+fi
+
+if [ ! -e "/usr/bin/scanimage" ]; then
+	echo "Could not find scanimage (part of sane-backends)!"
 	exit 1
 fi
 
@@ -49,4 +59,4 @@ fi
 #  (2) redirect stdout to the file $FILENAME
 # result: stderr is printed to the stdout stream of the process,
 #         stdout (the image data) is routed to the file
-/usr/bin/scanimage --device-name "$1" --mode "24bit Color[Fast]" --resolution $RESOLUTION --source FlatBed 2>&1 1>$FILENAME
+/usr/bin/scanimage --device-name "$1" --mode "24bit Color[Fast]" --resolution "$RESOLUTION" --source FlatBed 2>&1 1>"$FILENAME"

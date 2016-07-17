@@ -24,7 +24,7 @@ General information
 --------------------------------------------------------------------------------
 
 Author:  Frank Abelbeck
-Version: 2016-07-10-ALPHA
+Version: 2016-07-17-ALPHA
 Licence: GNU General Public License version 3
 
 --------------------------------------------------------------------------------
@@ -96,6 +96,7 @@ Files
 
 brotherscankeyd.py            main program
 brotherscankeyd.ini           default empty configuration file
+brotherscankeyd               OpenRC init script for brotherscankeyd.py
 COPYING                       GPL v3 license text
 README                        (this file)
 scan2image.sh                 an example of a scan-to-image script
@@ -113,3 +114,8 @@ Changelog
             moved CONFIGFILE and PIDFILE to standard locations /etc and
             /var/run respectively (program tries both paths);
             scan2* scripts revisited, now seem to work; various bug fixes
+
+2016-07-17: debugged program after first server trials; removed SEVERE scan
+            script quoting errors, altered script calling procedure,
+            introduced OpenRC init script
+
