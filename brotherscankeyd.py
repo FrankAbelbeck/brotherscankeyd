@@ -18,12 +18,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>."""
 
 import sys,os,os.path,subprocess,argparse,configparser
 import socket
-
 import select
 import signal
 import syslog
 import shlex
 import errno
+import multiprocessing
 
 try:
 	from pysnmp.entity.rfc3413.oneliner import cmdgen # one-liner SNMP commands
@@ -367,7 +367,10 @@ Args:
 				sys.exit(1)
 			elif isinstance(e,socket.gaierror):
 				# unexpected error...
-				self._logger.error("Socket error:",e)
+				self._logger.error("Socket error: {}".format(e))
+				sys.exit(1)
+			else:
+				self._logger.error("OS error: {}".format(e))
 				sys.exit(1)
 		
 		if daemonise:
@@ -452,7 +455,7 @@ Raises:
 			raise ValueError
 	
 	
-	def snmpSetRequest(self,printerTransport,function,user):
+	def snmpSetRequest(self,fd,function,user):
 		"""Issue an SNMP set request for a Brother variable in order to register with a
 printer's scan key.
 
@@ -469,27 +472,28 @@ Raises:
    OSError: an SNMP error occured.
    pysnmp.error.PySnmpError: malformed printer address or an SNMP error occured."""
 		appnum = self.genAppNum(function)
+		hostname,port = self._scanners[fd].getTransportInfo()[1]
 		errIndication, errStatus, errIndex, varBinds = self._generator.setCmd(
 			self._community,
-			printerTransport,
+			self._scanners[fd],
 			(
 				'1.3.6.1.4.1.2435.2.3.9.2.11.1.1.0', # OID
 				OctetString( # value
 					'TYPE=BR;BUTTON=SCAN;USER="{user}";FUNC={function};HOST={hostname}:{port};APPNUM={appnum};DURATION=360;BRID=;'.format(
 						user     = user,
 						function = function,
-						hostname = self._hostname,
-						port     = self._port,
+						hostname = hostname,
+						port     = port,
 						appnum   = appnum
 					)
 				)
 			)
 		)
 		if errIndication:
-			self._logger.debug(errIndication)
+			self._logger.debug("SNMP SET request error (process {}): {}".format(multiprocessing.current_process().name,errIndication))
 		else:
 			if errStatus:
-				self._logger.debug("{} at {}".format(errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
+				self._logger.debug("SNMP SET request error (process {}): {} at {}".format(multiprocessing.current_process().name,errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
 	
 	
 	def main(self):
@@ -530,6 +534,8 @@ Raises:
 		self._epoll.register(self._signalfile.fileno(),select.EPOLLIN)
 		# and now block these signals
 		signal.pthread_sigmask(signal.SIG_SETMASK,{signal.SIGTERM,signal.SIGINT})
+		
+		snmpproc = dict()
 		
 		# enter main loop
 		self.isrunning = True
@@ -612,11 +618,20 @@ Raises:
 					#
 					self._timers[fd].read() # read timer to disarm epoll on this fd
 					hostname,port = self._scanners[fd].getTransportInfo()[1]
-					self._logger.debug("sending SNMP SET request to {0}:{1}...".format(hostname,port))
 					for function in self._config[hostname].keys():
 						for user in self._config[hostname][function].keys():
+							procname="{0}:{1}/{2}/{3}".format(hostname,port,function,user)
 							try:
-								self.snmpSetRequest(self._scanners[fd],function,user)
+								self._logger.debug("SNMP SET request sent (process {})".format(procname))
+								# create subprocess, register with epoll/snmpproc and start it
+								proc = multiprocessing.Process(
+									name=procname,
+									target=self.snmpSetRequest,
+									args=(fd,function,user)
+								)
+								proc.start()
+								self._epoll.register(proc.sentinel,select.EPOLLIN)
+								snmpproc[proc.sentinel] = proc
 							except:
 								pass
 				
@@ -642,6 +657,15 @@ Raises:
 					del processes[fd]
 					del seqnum[fd]
 				
+				elif fd in snmpproc:
+					#
+					# SNMP process management: process terminated (sentinel became readable)
+					# remove process from list, unregister sentinel
+					#
+					self._logger.debug("SNMP SET request complete (process {})".format(snmpproc[fd].name))
+					self._epoll.unregister(fd)
+					del snmpproc[fd]
+				
 				elif fd == self._signalfile.fileno():
 					#
 					# pending signal
@@ -657,6 +681,10 @@ Raises:
 						pass
 		
 		# daemon is terminating...
+		for fd in snmpproc:
+			snmpproc[fd].terminate()
+			snmpproc[fd].join()
+			self._logger.debug("SNMP SET process terminated (process {})".format(snmpproc[fd].name))
 		os.remove(pidfile)
 		syslog.closelog()
 
