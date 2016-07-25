@@ -24,7 +24,7 @@ General information
 --------------------------------------------------------------------------------
 
 Author:  Frank Abelbeck
-Version: 2016-07-17-ALPHA
+Version: 2016-07-25-ALPHA
 Licence: GNU General Public License version 3
 
 --------------------------------------------------------------------------------
@@ -118,4 +118,6 @@ Changelog
 2016-07-17: debugged program after first server trials; removed SEVERE scan
             script quoting errors, altered script calling procedure,
             introduced OpenRC init script
+
+2016-07-25: moved SNMP requests into subprocess to avoid blocking the main loop
 
