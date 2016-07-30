@@ -285,8 +285,9 @@ Args:
 					for entry,path in cfg[menutype].items():
 						pathargs = shlex.split(path) # split path according to BASh syntax
 						script = pathargs[0] # isolate script name
-						pathargs.insert(1,shlex.quote(self._devices[dev])) # inject device name (quoted)
-						pathargs = " ".join(pathargs) # DEBUG: shell=True --> reconstruct argument string
+						pathargs.insert(1,self._devices[dev]) # inject device name
+						#pathargs.insert(1,shlex.quote(self._devices[dev])) # inject device name (quoted)
+						#pathargs = " ".join(pathargs) # DEBUG: shell=True --> reconstruct argument string
 						if os.path.isfile(script) and os.path.isabs(script):
 							# script file exists: create entry
 							# check if entry name can be expressed as octet string
@@ -349,8 +350,14 @@ Args:
 		try:
 			if not hostname:
 				# no hostname argument given: try to obtain it automatically
-				hostname = socket.gethostbyname(socket.gethostname())
+				# (read about it on StackOverflow...)
+				s = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+				s.connect(("1.1.1.1",0))
+				hostname = s.getsockname()[0]
+				s.close()
+			
 			self._socket_server = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+			self._logger.debug("Trying to bind UDP port at {0}:{1}".format(hostname,port))
 			self._socket_server.bind(( hostname,port ))
 			self._socket_server.setblocking(False)
 			# read back actual hostname/port information
@@ -472,19 +479,19 @@ Raises:
    OSError: an SNMP error occured.
    pysnmp.error.PySnmpError: malformed printer address or an SNMP error occured."""
 		appnum = self.genAppNum(function)
-		hostname,port = self._scanners[fd].getTransportInfo()[1]
 		errIndication, errStatus, errIndex, varBinds = self._generator.setCmd(
 			self._community,
 			self._scanners[fd],
 			(
 				'1.3.6.1.4.1.2435.2.3.9.2.11.1.1.0', # OID
 				OctetString( # value
-					'TYPE=BR;BUTTON=SCAN;USER="{user}";FUNC={function};HOST={hostname}:{port};APPNUM={appnum};DURATION=360;BRID=;'.format(
+					'TYPE=BR;BUTTON=SCAN;USER="{user}";FUNC={function};HOST={hostname}:{port};APPNUM={appnum};DURATION={duration};BRID=;'.format(
 						user     = user,
 						function = function,
-						hostname = hostname,
-						port     = port,
-						appnum   = appnum
+						hostname = self._hostname,
+						port     = self._port,
+						appnum   = appnum,
+						duration = self._cycle
 					)
 				)
 			)
@@ -602,7 +609,7 @@ Raises:
 								stdout=subprocess.PIPE,
 								stderr=subprocess.PIPE,
 								universal_newlines=True,
-								shell=True
+								#shell=True
 							)
 							processes[process.stdout.fileno()] = process
 							seqnum[process.stdout.fileno()] = seq
@@ -648,6 +655,8 @@ Raises:
 							pass # process has terminated, ignore
 						except:
 							self._logger.exception("Potential problem with script PID={0}".format(processes[fd].pid))
+					else:
+						self._logger.debug("Script terminated with code {}".format(processes[fd].returncode))
 					self._logger.debug(processes[fd].stdout.read())
 					if processes[fd].returncode != 0:
 						self._logger.error(processes[fd].stderr.read())
