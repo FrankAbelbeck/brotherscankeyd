@@ -24,7 +24,7 @@ General information
 --------------------------------------------------------------------------------
 
 Author:  Frank Abelbeck
-Version: 2016-07-25-ALPHA
+Version: 2016-08-06-ALPHA
 Licence: GNU General Public License version 3
 
 --------------------------------------------------------------------------------
@@ -121,3 +121,4 @@ Changelog
 
 2016-07-25: moved SNMP requests into subprocess to avoid blocking the main loop
 
+2016-08-06: fixed a race condition while calling external programs
