@@ -59,4 +59,4 @@ fi
 #  (2) redirect stdout to the file $FILENAME
 # result: stderr is printed to the stdout stream of the process,
 #         stdout (the image data) is routed to the file
-/usr/bin/scanimage --device-name "$1" --mode "24bit Color[Fast]" --resolution "$RESOLUTION" --source FlatBed 2>&1 1>"$FILENAME"
+/usr/bin/scanimage --device-name="$1" --mode="24bit Color[Fast]" --resolution="$RESOLUTION" --source="FlatBed" 2>&1 1>"$FILENAME"

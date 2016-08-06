@@ -286,8 +286,8 @@ Args:
 						pathargs = shlex.split(path) # split path according to BASh syntax
 						script = pathargs[0] # isolate script name
 						pathargs.insert(1,self._devices[dev]) # inject device name
-						#pathargs.insert(1,shlex.quote(self._devices[dev])) # inject device name (quoted)
-						#pathargs = " ".join(pathargs) # DEBUG: shell=True --> reconstruct argument string
+#						pathargs.insert(1,shlex.quote(self._devices[dev])) # inject device name (quoted)
+#						pathargs = " ".join(pathargs) # DEBUG: shell=True --> reconstruct argument string
 						if os.path.isfile(script) and os.path.isabs(script):
 							# script file exists: create entry
 							# check if entry name can be expressed as octet string
@@ -524,7 +524,7 @@ Raises:
 		
 		# prepare process and sequence management
 		processes = dict()
-		seqnum = dict()
+		seqnum = set()
 		
 		# register all timers
 		for fd in self._timers.keys():
@@ -592,7 +592,7 @@ Raises:
 					
 					if button == "SCAN" and appnum == self.genAppNum(function) and \
 						hostname == self._hostname and port == self._port and \
-						seq not in seqnum.values():
+						seq not in seqnum:
 						# scan button message; appnum equivalent to function name
 						# correct hostname/port and sequence number not seen yet
 						# -> call a script associated with given function/user name
@@ -603,21 +603,21 @@ Raises:
 							break # a deviced called in that is not registered? nevermind
 						try:
 							# call script as background process
-							self._logger.debug("script call: {0}".format(self._config[address[0]][function][user]))
-							process = subprocess.Popen(
-								self._config[address[0]][function][user],
-								stdout=subprocess.PIPE,
-								stderr=subprocess.PIPE,
-								universal_newlines=True,
-								#shell=True
+							seqnum.add(seq)
+							process = multiprocessing.Process(
+								target=subprocess.call,
+								kwargs={
+									"args":self._config[address[0]][function][user]
+								}
 							)
-							processes[process.stdout.fileno()] = process
-							seqnum[process.stdout.fileno()] = seq
-							self._epoll.register(process.stdout.fileno(),select.EPOLLHUP | EPOLLRDHUP)
+							process.start()
+							processes[process.sentinel] = process,seq
+							self._epoll.register(process.sentinel,select.EPOLLIN | EPOLLRDHUP)
+							self._logger.debug("script call: {} (process {})".format(self._config[address[0]][function][user],process.pid))
 						except:
 							# either call() failed or no script is connected to said device/function/user:
 							# need to think of a way to send an error message to the scanner?
-							self._logger.exception("Problem calling script {0}".format(self._config[address[0]][function][user]))
+							self._logger.exception("Problem calling script {}".format(self._config[address[0]][function][user]))
 				
 				elif fd in self._scanners:
 					#
@@ -646,25 +646,22 @@ Raises:
 					#
 					# process management: stdout of a process hung up
 					#
-					if processes[fd].poll() == None:
+					proc,seq= processes[fd]
+					if proc.exitcode == None:
 						# returncode None: process has not yet terminated,
 						# but stdout hung up; zombie? kill it!
 						try:
-							processes[fd].kill()
+							proc.kill()
 						except ProcessLookupError:
 							pass # process has terminated, ignore
 						except:
-							self._logger.exception("Potential problem with script PID={0}".format(processes[fd].pid))
+							self._logger.exception("Potential problem with script PID={0}".format(proc.pid))
 					else:
-						self._logger.debug("Script terminated with code {}".format(processes[fd].returncode))
-					self._logger.debug(processes[fd].stdout.read())
-					if processes[fd].returncode != 0:
-						self._logger.error(processes[fd].stderr.read())
-					# unregister stdout fileno
+						self._logger.debug("Script terminated with code {}".format(proc.exitcode))
 					self._epoll.unregister(fd)
 					# remove from list
 					del processes[fd]
-					del seqnum[fd]
+					seqnum.remove(seq)
 				
 				elif fd in snmpproc:
 					#

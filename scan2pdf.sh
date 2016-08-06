@@ -86,7 +86,7 @@ done
 #  (4) remove images
 IMGNAME="$(/usr/bin/mktemp -u)"
 
-/usr/bin/scanadf --device-name "$1" --output-file "$IMGNAME-%02d" --mode "24bit Color[Fast]" --resolution 300 2>&1
+/usr/bin/scanadf --device-name="$1" --output-file="$IMGNAME-%02d" --mode="24bit Color[Fast]" --resolution="300" 2>&1
 /usr/bin/convert "$IMGNAME*" -trim -compress jpeg -quality 92 -page A4 "$FILENAME"
 # remove all scanned images
 echo /bin/rm "$IMGNAME"*
