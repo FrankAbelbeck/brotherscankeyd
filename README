@@ -61,7 +61,7 @@ Which programs and libraries are needed?
 
 Python3  (3.4.3-r1)
 pysnmp   (4.2.5)
-linuxfd  (1.0, cf. https://www.github.com/abelbeck/linuxfd)
+linuxfd  (1.3, cf. https://www.github.com/abelbeck/linuxfd)
 
 --------------------------------------------------------------------------------
 Installation
@@ -121,4 +121,6 @@ Changelog
 
 2016-07-25: moved SNMP requests into subprocess to avoid blocking the main loop
 
-2016-08-06: fixed a race condition while calling external programs
+2016-08-06: fixed a script calling race condition (scanner not immediately ready
+            for connects of scanimage/scanadt after issuing a notification) by
+            introducing a two second delay
