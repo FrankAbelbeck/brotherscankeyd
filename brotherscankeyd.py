@@ -24,6 +24,7 @@ import syslog
 import shlex
 import errno
 import multiprocessing
+import time
 
 try:
 	from pysnmp.entity.rfc3413.oneliner import cmdgen # one-liner SNMP commands
@@ -503,6 +504,22 @@ Raises:
 				self._logger.debug("SNMP SET request error (process {}): {} at {}".format(multiprocessing.current_process().name,errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
 	
 	
+	def callScript(self,*args,*kwargs):
+		"""Wrapper function for subprocess.call().
+Adds a two second delay to fix a race condition
+(cf. https://forums.gentoo.org/viewtopic-p-7952026.html).
+
+Args:
+   args: a variable number of arguments passed to call().
+   kwargs: a variable number of key-value argument pairs passed to call().
+
+Returns:
+   An integer; exitcode of the called executable.
+"""
+		time.sleep(2)
+		return subprocess.call(*args,*kwargs)
+	
+	
 	def main(self):
 		"""Main program loop"""
 		
@@ -605,7 +622,7 @@ Raises:
 							# call script as background process
 							seqnum.add(seq)
 							process = multiprocessing.Process(
-								target=subprocess.call,
+								target=self.callScript,
 								kwargs={
 									"args":self._config[address[0]][function][user]
 								}
