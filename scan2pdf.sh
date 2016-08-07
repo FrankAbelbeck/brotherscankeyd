@@ -89,7 +89,7 @@ IMGNAME="$(/usr/bin/mktemp -u)"
 /usr/bin/scanadf --device-name="$1" --output-file="$IMGNAME-%02d" --mode="24bit Color[Fast]" --resolution="300" 2>&1
 /usr/bin/convert "$IMGNAME*" -trim -compress jpeg -quality 92 -page A4 "$FILENAME"
 # remove all scanned images
-echo /bin/rm "$IMGNAME"*
+/bin/rm "$IMGNAME"*
 
 #  (5) if either odd or even is set: merge with newest even or odd file
 if [ -n "$SUFFIX" ]; then
@@ -116,8 +116,8 @@ if [ -n "$SUFFIX" ]; then
 			/usr/bin/pdftk A="$ODDFILE" B="$EVENFILE" shuffle A B output "$FILENAME"
 		fi
 		# remove odd and even file: now replaced by merged file
-		echo /bin/rm "$EVENFILE"
-		echo /bin/rm "$ODDFILE"
+		/bin/rm "$EVENFILE"
+		/bin/rm "$ODDFILE"
 	fi
 fi
 

@@ -504,7 +504,7 @@ Raises:
 				self._logger.debug("SNMP SET request error (process {}): {} at {}".format(multiprocessing.current_process().name,errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
 	
 	
-	def callScript(self,*args,*kwargs):
+	def callScript(self,*args,**kwargs):
 		"""Wrapper function for subprocess.call().
 Adds a two second delay to fix a race condition
 (cf. https://forums.gentoo.org/viewtopic-p-7952026.html).
@@ -517,7 +517,7 @@ Returns:
    An integer; exitcode of the called executable.
 """
 		time.sleep(2)
-		return subprocess.call(*args,*kwargs)
+		return subprocess.call(*args,**kwargs)
 	
 	
 	def main(self):
