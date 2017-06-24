@@ -5,8 +5,10 @@ depend() {
 }
 
 start() {
+	local verbose
+	yesno $rc_verbose || verbose=--verbose
 	ebegin "Starting brotherscankeyd"
-	/usr/bin/brotherscankeyd.py --syslog daemon
+	/usr/bin/brotherscankeyd.py ${verbose} --syslog daemon
 	eend $?
 }
 

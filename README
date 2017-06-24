@@ -24,7 +24,7 @@ General information
 --------------------------------------------------------------------------------
 
 Author:  Frank Abelbeck
-Version: 2016-08-06-ALPHA
+Version: 2017-06-24-ALPHA
 Licence: GNU General Public License version 3
 
 --------------------------------------------------------------------------------
@@ -57,11 +57,12 @@ Requirements
 --------------------------------------------------------------------------------
 
 Which programs and libraries are needed?
-(In parantheses: Gentoo Linux versions this program was created/tested with)
+(in parantheses: Gentoo Linux versions this program was created/tested with and
+an URL for more information)
 
-Python3  (3.4.3-r1)
-pysnmp   (4.2.5)
-linuxfd  (1.3, cf. https://www.github.com/abelbeck/linuxfd)
+Python3  (3.4.5,    https://www.python.org/)
+net-snmp (5.7.3-r5, http://net-snmp.sourceforge.net/)
+linuxfd  (1.4.4,    https://www.github.com/abelbeck/linuxfd)
 
 --------------------------------------------------------------------------------
 Installation
@@ -124,3 +125,6 @@ Changelog
 2016-08-06: fixed a script calling race condition (scanner not immediately ready
             for connects of scanimage/scanadt after issuing a notification) by
             introducing a two second delay
+
+2017-06-24: removed pysnmp dependencies; SNMP requests are now sent with
+            /usr/bin/snmpset (http://net-snmp.sourceforge.net/).

@@ -26,16 +26,6 @@ import errno
 import multiprocessing
 import time
 
-try:
-	from pysnmp.entity.rfc3413.oneliner import cmdgen # one-liner SNMP commands
-	from pysnmp.proto.rfc1902 import OctetString # create SNMP variable value strings
-	import pysnmp.error
-	import pysnmp.carrier.error
-	import pyasn1.error
-except ImportError:
-	print("Required Python module: pysnmp.")
-	sys.exit(1)
-
 import logging
 import logging.handlers
 
@@ -237,7 +227,7 @@ Args:
 			for device in secDevs:
 					try:
 						# create UDP transport; fails if ip is invalid
-						transport = cmdgen.UdpTransportTarget((cfg[device]["ip"],161))
+						transport = cfg[device]["ip"],161
 						timer = linuxfd.timerfd(rtc=True,nonBlocking=True)
 						# map timer fileno to UDP transport: timer expires --> send new request to scanner IP
 						self._timers[timer.fileno()] = timer
@@ -253,12 +243,10 @@ Args:
 							devips[device] = cfg[device]["ip"]
 							devnames[cfg[device]["ip"]] = device
 							self._logger.info("Adding device {devname} (IP={ip},dev={address})...".format(devname=device,ip=cfg[device]["ip"],address=cfg[device]["dev"]))
-					except (pysnmp.error.PySnmpError,OSError):
-						# pysnmp: transport target could not be set up
+					except OSError:
 						# OSError: timer creation failed
 						# in any case: don't add device
 						self._logger.warning("Not adding device {devname} (erroneous definition)".format(devname=device))
-						pass
 			
 			if len(devips) == 0:
 				self._logger.info("No devices defined. Nothing to do, terminating.")
@@ -294,8 +282,8 @@ Args:
 							# check if entry name can be expressed as octet string
 							# (i.e. can be presented in us-ascii)
 							try:
-								OctetString(entry)
-							except pyasn1.error.PyAsn1Error:
+								entry = entry.encode("ascii").decode()
+							except UnicodeError:
 								self._logger.warning("Ignoring entry {device} / {menu} / {entry} (entry not encodable with us-ascii)".format(entry=entry,menu=menu,device=devnames[dev]))
 								continue
 							try:
@@ -342,10 +330,6 @@ Args:
 			else:
 				self._logger.error("Default configuration file {} missing. Terminating.".format(CONFIGFILE))
 			sys.exit(1)
-		
-		# prepare SNMP generator
-		self._generator = cmdgen.CommandGenerator()
-		self._community = cmdgen.CommunityData("internal", mpModel=0) # mpModel == 0 --> SNMP version 1 
 		
 		# create non-blocking server socket
 		try:
@@ -470,38 +454,28 @@ printer's scan key.
 According to a wireshark dump, SNMP version 1 is used with community "internal".
 
 Args:
-   printerTransport: a pySNMP UdpTransportTarget object addressing the
-                     printer's SNMP service; usually port 161 UDP is used.
+   fd: an integer; file descriptor of the timer object managing the scanner.
    function: a string, either "IMAGE", "EMAIL", "OCR" or "FILE".
    user: a string; the target name shown on the printer's display.
 
 Raises:
    ValueError: function not in set ("IMAGE","EMAIL","OCR","FILE").
-   OSError: an SNMP error occured.
-   pysnmp.error.PySnmpError: malformed printer address or an SNMP error occured."""
-		appnum = self.genAppNum(function)
-		errIndication, errStatus, errIndex, varBinds = self._generator.setCmd(
-			self._community,
-			self._scanners[fd],
-			(
-				'1.3.6.1.4.1.2435.2.3.9.2.11.1.1.0', # OID
-				OctetString( # value
-					'TYPE=BR;BUTTON=SCAN;USER="{user}";FUNC={function};HOST={hostname}:{port};APPNUM={appnum};DURATION={duration};BRID=;'.format(
-						user     = user,
-						function = function,
-						hostname = self._hostname,
-						port     = self._port,
-						appnum   = appnum,
-						duration = self._cycle
-					)
-				)
+   OSError: an error occured while calling snmpset."""
+		return subprocess.check_output(["/usr/bin/snmpset",
+			"-c","internal",
+			"-v","1",
+			"udp:{}:{}".format(*self._scanners[fd]),
+			"1.3.6.1.4.1.2435.2.3.9.2.11.1.1.0",
+			"s",
+			"""TYPE=BR;BUTTON=SCAN;USER="{user}";FUNC={function};HOST={hostname}:{port};APPNUM={appnum};DURATION={duration};BRID=;""".format(
+				user     = user,
+				function = function,
+				hostname = self._hostname,
+				port     = self._port,
+				appnum   = self.genAppNum(function),
+				duration = self._cycle
 			)
-		)
-		if errIndication:
-			self._logger.debug("SNMP SET request error (process {}): {}".format(multiprocessing.current_process().name,errIndication))
-		else:
-			if errStatus:
-				self._logger.debug("SNMP SET request error (process {}): {} at {}".format(multiprocessing.current_process().name,errStatus.prettyPrint(),errIndex and varBinds[int(errIndex)-1] or '?'))
+		],stderr=subprocess.STDOUT)
 	
 	
 	def callScript(self,*args,**kwargs):
@@ -517,7 +491,8 @@ Returns:
    An integer; exitcode of the called executable.
 """
 		time.sleep(2)
-		return subprocess.call(*args,**kwargs)
+		kwargs["stderr"] = subprocess.STDOUT # redirect stderr to stdout
+		return subprocess.check_output(*args,**kwargs)
 	
 	
 	def main(self):
@@ -641,7 +616,7 @@ Returns:
 					# a timer expired: repeat SNMP SET requests
 					#
 					self._timers[fd].read() # read timer to disarm epoll on this fd
-					hostname,port = self._scanners[fd].getTransportInfo()[1]
+					hostname,port = self._scanners[fd]
 					for function in self._config[hostname].keys():
 						for user in self._config[hostname][function].keys():
 							procname="{0}:{1}/{2}/{3}".format(hostname,port,function,user)
@@ -654,14 +629,15 @@ Returns:
 									args=(fd,function,user)
 								)
 								proc.start()
-								self._epoll.register(proc.sentinel,select.EPOLLIN)
+								self._epoll.register(proc.sentinel,select.EPOLLIN | EPOLLRDHUP)
 								snmpproc[proc.sentinel] = proc
 							except:
 								pass
 				
 				elif fd in processes:
 					#
-					# process management: stdout of a process hung up
+					# process management: process terminated (sentinel became readable)
+					# remove process+seq from list, unregister sentinel
 					#
 					proc,seq= processes[fd]
 					if proc.exitcode == None:
@@ -676,7 +652,6 @@ Returns:
 					else:
 						self._logger.debug("Script terminated with code {}".format(proc.exitcode))
 					self._epoll.unregister(fd)
-					# remove from list
 					del processes[fd]
 					seqnum.remove(seq)
 				
@@ -685,7 +660,21 @@ Returns:
 					# SNMP process management: process terminated (sentinel became readable)
 					# remove process from list, unregister sentinel
 					#
-					self._logger.debug("SNMP SET request complete (process {})".format(snmpproc[fd].name))
+					proc = snmpproc[fd]
+					if proc.exitcode == None:
+						# returncode None: process has not yet terminated,
+						# but stdout hung up; zombie? kill it!
+						try:
+							proc.kill()
+						except ProcessLookupError:
+							# process has terminated, ignore
+							pass
+						except:
+							self._logger.exception("Potential problem with SNMP request (PID={0})".format(proc.pid))
+					elif proc.exitcode == 0:
+						self._logger.debug("SNMP request ({}) completed".format(proc.name))
+					else:
+						self._logger.debug("SNMP request ({}) terminated with code {}".format(proc.name,proc.exitcode))
 					self._epoll.unregister(fd)
 					del snmpproc[fd]
 				
