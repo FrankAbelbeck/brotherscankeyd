@@ -644,7 +644,7 @@ Returns:
 						# returncode None: process has not yet terminated,
 						# but stdout hung up; zombie? kill it!
 						try:
-							proc.kill()
+							proc.terminate()
 						except ProcessLookupError:
 							pass # process has terminated, ignore
 						except:
@@ -665,7 +665,7 @@ Returns:
 						# returncode None: process has not yet terminated,
 						# but stdout hung up; zombie? kill it!
 						try:
-							proc.kill()
+							proc.terminate()
 						except ProcessLookupError:
 							# process has terminated, ignore
 							pass

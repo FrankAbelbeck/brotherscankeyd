@@ -24,7 +24,7 @@ General information
 --------------------------------------------------------------------------------
 
 Author:  Frank Abelbeck
-Version: 2017-06-24-ALPHA
+Version: 2017-07-02-ALPHA
 Licence: GNU General Public License version 3
 
 --------------------------------------------------------------------------------
@@ -128,3 +128,5 @@ Changelog
 
 2017-06-24: removed pysnmp dependencies; SNMP requests are now sent with
             /usr/bin/snmpset (http://net-snmp.sourceforge.net/).
+
+2017-07-02: fixed process management: replaced proc.kill() with proc.terminate()
